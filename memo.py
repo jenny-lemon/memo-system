@@ -11,23 +11,43 @@ import gspread
 import requests
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError, SpreadsheetNotFound, WorksheetNotFound
+
+import streamlit as st
 
 import accounts
 import env
 
 
-GOOGLE_SERVICE_ACCOUNT_FILE = env.GOOGLE_SERVICE_ACCOUNT_FILE
+# =========================
+# 基本設定
+# =========================
 SHEET_ID = env.SHEET_ID
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
 
-BASE_URL = "https://backend.lemonclean.com.tw"
+ENV_NAME = getattr(env, "ENV", "prod").lower()
+BASE_URL_DEV = getattr(env, "BASE_URL_DEV", "https://backend-dev.lemonclean.com.tw")
+BASE_URL_PROD = getattr(env, "BASE_URL_PROD", "https://backend.lemonclean.com.tw")
+
+if ENV_NAME == "dev":
+    BASE_URL = BASE_URL_DEV.rstrip("/")
+else:
+    BASE_URL = BASE_URL_PROD.rstrip("/")
+
 LOGIN_URL = f"{BASE_URL}/login"
 PURCHASE_URL = f"{BASE_URL}/purchase"
 
 
+# =========================
+# 工具
+# =========================
 def log(msg: str) -> None:
     print(msg, flush=True)
+    try:
+        st.write(msg)
+    except Exception:
+        pass
 
 
 def normalize_text(text: str) -> str:
@@ -151,6 +171,9 @@ def parse_cli_args(argv: List[str]) -> Tuple[int, Optional[int], bool]:
     return start_row, end_row, force
 
 
+# =========================
+# 區域判斷
+# =========================
 def match_region_by_address(address: str) -> Optional[str]:
     addr = str(address or "")
     for region, cfg in accounts.ACCOUNTS.items():
@@ -159,29 +182,51 @@ def match_region_by_address(address: str) -> Optional[str]:
                 return region
     return None
 
-import json
-import streamlit as st
 
-print("🔥 USING STREAMLIT SECRETS")
+# =========================
+# Google Sheet
+# =========================
 def get_google_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
 
-    creds_dict = dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+    try:
+        creds_dict = dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+    except Exception as e:
+        raise RuntimeError(
+            "讀不到 Streamlit Secrets 的 GOOGLE_SERVICE_ACCOUNT。"
+            "請到 Streamlit Cloud → Manage app → Secrets 設定 [GOOGLE_SERVICE_ACCOUNT]。"
+        ) from e
 
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=scopes,
-    )
+    try:
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=scopes,
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SHEET_ID)
+        return sh.worksheet(WORKSHEET_NAME)
+    except WorksheetNotFound as e:
+        raise RuntimeError(
+            f"找不到工作表 '{WORKSHEET_NAME}'。請確認 Google Sheet 分頁名稱正確。"
+        ) from e
+    except SpreadsheetNotFound as e:
+        raise RuntimeError(
+            f"找不到 Spreadsheet，請確認 SHEET_ID 是否正確，且 service account 已被分享進該 Sheet。"
+        ) from e
+    except APIError as e:
+        client_email = creds_dict.get("client_email", "(unknown)")
+        raise RuntimeError(
+            "Google Sheet API 存取失敗。"
+            f"請確認 SHEET_ID 正確，並把這個 service account 加到該 Sheet 的共用名單且給編輯權限：{client_email}"
+        ) from e
 
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
-    return sh.worksheet(WORKSHEET_NAME)
 
-
-
+# =========================
+# 後台
+# =========================
 def get_soup(session: requests.Session, url: str, params=None) -> BeautifulSoup:
     resp = session.get(url, params=params, timeout=30)
     resp.raise_for_status()
@@ -543,7 +588,7 @@ def submit_update_processed_with_notice(
     fields = dict(form_info["fields"])
 
     fields["notice"] = new_notice
-    fields["progress"] = "1"   # 已處理
+    fields["progress"] = "1"
 
     params = {"phone": phone} if phone else None
 
@@ -575,7 +620,7 @@ def update_failed_sheet(worksheet, row_num: int):
 
 
 def main():
-    print("🔥 USING STREAMLIT SECRETS")
+    print(f"[環境] ENV={ENV_NAME} | BASE_URL={BASE_URL}")
     worksheet = get_google_worksheet()
 
     start_row, end_row, force = parse_cli_args(sys.argv[1:])
@@ -593,11 +638,11 @@ def main():
             print(f"\n===== 第 {row_num} 列 =====")
             print("原始列資料:", row_values)
 
-            current_order_no = safe_cell(row_values, 2)          # B
-            service_date_str = safe_cell(row_values, 8)          # H
-            current_address = safe_cell(row_values, 14)          # N
-            current_phone = safe_cell(row_values, 15)            # O
-            sheet_status = safe_cell(row_values, 22)             # V
+            current_order_no = safe_cell(row_values, 2)
+            service_date_str = safe_cell(row_values, 8)
+            current_address = safe_cell(row_values, 14)
+            current_phone = safe_cell(row_values, 15)
+            sheet_status = safe_cell(row_values, 22)
 
             print("訂單編號:", current_order_no)
             print("服務日期:", service_date_str)
