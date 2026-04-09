@@ -160,14 +160,22 @@ def match_region_by_address(address: str) -> Optional[str]:
     return None
 
 
+import streamlit as st
+import json
+
 def get_google_worksheet():
-    creds = Credentials.from_service_account_file(
-        GOOGLE_SERVICE_ACCOUNT_FILE,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ],
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=scopes,
     )
+
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SHEET_ID)
     return sh.worksheet(WORKSHEET_NAME)
