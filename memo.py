@@ -169,7 +169,7 @@ def get_google_worksheet():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+    creds_dict = dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
 
     creds = Credentials.from_service_account_info(
         creds_dict,
