@@ -162,6 +162,7 @@ def match_region_by_address(address: str) -> Optional[str]:
 import json
 import streamlit as st
 
+print("🔥 USING STREAMLIT SECRETS")
 def get_google_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -574,6 +575,7 @@ def update_failed_sheet(worksheet, row_num: int):
 
 
 def main():
+    print("🔥 USING STREAMLIT SECRETS")
     worksheet = get_google_worksheet()
 
     start_row, end_row, force = parse_cli_args(sys.argv[1:])
