@@ -130,3 +130,15 @@ if st.button("🚀 開始執行", type="primary"):
 
     except Exception as e:
         st.error(f"執行失敗：{e}")
+
+ENV_NAME = getattr(env, "ENV", "prod").lower()
+BASE_URL_DEV = getattr(env, "BASE_URL_DEV", "https://backend-dev.lemonclean.com.tw")
+BASE_URL_PROD = getattr(env, "BASE_URL_PROD", "https://backend.lemonclean.com.tw")
+
+if ENV_NAME == "dev":
+    BASE_URL = BASE_URL_DEV.rstrip("/")
+else:
+    BASE_URL = BASE_URL_PROD.rstrip("/")
+
+LOGIN_URL = f"{BASE_URL}/login"
+PURCHASE_URL = f"{BASE_URL}/purchase"
