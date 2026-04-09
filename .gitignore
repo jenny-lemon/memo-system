@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+env.py
+accounts.py
+service_account.json
+
+*.log
