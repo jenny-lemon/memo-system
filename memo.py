@@ -159,13 +159,8 @@ def match_region_by_address(address: str) -> Optional[str]:
                 return region
     return None
 
-
 import json
-
-try:
-    import streamlit as st
-except Exception:
-    st = None
+import streamlit as st
 
 def get_google_worksheet():
     scopes = [
@@ -173,24 +168,17 @@ def get_google_worksheet():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    if st is not None:
-        try:
-            creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        except Exception:
-            creds = Credentials.from_service_account_file(
-                GOOGLE_SERVICE_ACCOUNT_FILE,
-                scopes=scopes,
-            )
-    else:
-        creds = Credentials.from_service_account_file(
-            GOOGLE_SERVICE_ACCOUNT_FILE,
-            scopes=scopes,
-        )
+    creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=scopes,
+    )
 
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SHEET_ID)
     return sh.worksheet(WORKSHEET_NAME)
+
 
 
 def get_soup(session: requests.Session, url: str, params=None) -> BeautifulSoup:
