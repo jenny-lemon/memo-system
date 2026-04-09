@@ -4,8 +4,11 @@ import accounts
 
 st.set_page_config(page_title="Memo System", layout="wide")
 
+st.title("📋 Memo 自動補備註系統")
+st.caption("比對上一筆已處理訂單的客服備註，回填到同電話同地址的未處理訂單，並改成已處理")
+
 # -------------------------
-# 初始化預設環境
+# 環境選擇
 # -------------------------
 env_options = {
     "正式機 prod": "prod",
@@ -14,13 +17,6 @@ env_options = {
 
 default_env_label = "測試機 dev" if memo.ENV_NAME == "dev" else "正式機 prod"
 
-# 先畫標題
-st.title("📋 Memo 自動補備註系統")
-st.caption("比對上一筆已處理訂單的客服備註，回填到同電話同地址的未處理訂單，並改成已處理")
-
-# -------------------------
-# 環境選擇
-# -------------------------
 with st.container(border=True):
     st.subheader("1. 選擇環境")
 
@@ -33,7 +29,6 @@ with st.container(border=True):
 
     selected_env = env_options[selected_env_label]
 
-    # 先更新 memo 內的全域變數
     memo.ENV_NAME = selected_env
     if selected_env == "dev":
         memo.BASE_URL = memo.BASE_URL_DEV.rstrip("/")
@@ -110,13 +105,12 @@ with st.container(border=True):
 
     def ui_logger(message: str):
         st.session_state.live_logs.append(message)
-        log_box.code("\n".join(st.session_state.live_logs[-300:]))
+        log_box.code("\n".join(st.session_state.live_logs[-500:]))
 
     if st.button("🚀 開始執行", type="primary", use_container_width=True):
         st.session_state.live_logs = []
         log_box.code("準備執行中...")
 
-        # 回寫帳密到 accounts
         if "台北" in accounts.ACCOUNTS:
             accounts.ACCOUNTS["台北"]["email"] = taipei_email
             accounts.ACCOUNTS["台北"]["password"] = taipei_password
