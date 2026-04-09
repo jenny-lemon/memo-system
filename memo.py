@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 
-import sys
 import re
 import time
 from datetime import datetime
 from urllib.parse import urljoin
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Callable
 
 import gspread
 import requests
@@ -19,6 +18,9 @@ import accounts
 import env
 
 
+# =========================
+# 基本設定
+# =========================
 SHEET_ID = env.SHEET_ID
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
@@ -35,13 +37,19 @@ else:
 LOGIN_URL = f"{BASE_URL}/login"
 PURCHASE_URL = f"{BASE_URL}/purchase"
 
+LOG_BUFFER: List[str] = []
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
-    try:
-        st.write(msg)
-    except Exception:
-        pass
+
+# =========================
+# 工具
+# =========================
+def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+        LOG_BUFFER.append(msg)
+        if ui_logger:
+            ui_logger(msg)
+    return _log
 
 
 def normalize_text(text: str) -> str:
@@ -161,30 +169,9 @@ def parse_row_spec(spec: str) -> List[int]:
     return sorted(rows)
 
 
-def parse_cli_args(argv: List[str], max_row: int) -> (List[int], bool):
-    force = False
-    args = []
-
-    for a in argv:
-        if a == "--force":
-            force = True
-        else:
-            args.append(a)
-
-    if args:
-        row_spec = args[0]
-        row_numbers = [r for r in parse_row_spec(row_spec) if r <= max_row]
-        print(f"[模式] 指定列：{row_spec} -> {row_numbers}")
-    else:
-        row_numbers = list(range(2, max_row + 1))
-        print("[模式] 全部列")
-
-    if force:
-        print("[選項] 強制重跑：忽略 V 欄已有值")
-
-    return row_numbers, force
-
-
+# =========================
+# 區域判斷
+# =========================
 def match_region_by_address(address: str) -> Optional[str]:
     addr = str(address or "")
     for region, cfg in accounts.ACCOUNTS.items():
@@ -194,6 +181,9 @@ def match_region_by_address(address: str) -> Optional[str]:
     return None
 
 
+# =========================
+# Google Sheet
+# =========================
 def get_google_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -227,6 +217,9 @@ def get_google_worksheet():
         ) from e
 
 
+# =========================
+# 後台
+# =========================
 def get_soup(session: requests.Session, url: str, params=None) -> BeautifulSoup:
     resp = session.get(url, params=params, timeout=30)
     resp.raise_for_status()
@@ -575,19 +568,36 @@ def submit_update_processed_with_notice(session: requests.Session, form_info: Di
     return resp
 
 
-def main():
-    print(f"[環境] ENV={ENV_NAME} | BASE_URL={BASE_URL}")
+def main(row_spec: Optional[str] = None, force: bool = False, ui_logger: Optional[Callable[[str], None]] = None):
+    logger = make_logger(ui_logger)
+
+    logger(f"[環境] ENV={ENV_NAME} | BASE_URL={BASE_URL}")
     worksheet = get_google_worksheet()
 
-    # 一次讀完整張表
     all_values = worksheet.get_all_values()
     max_row = len(all_values)
 
-    if max_row < 2:
-        log("sheet 沒資料")
-        return
+    stats = {
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "errors": [],
+    }
 
-    row_numbers, force = parse_cli_args(sys.argv[1:], max_row)
+    if max_row < 2:
+        logger("sheet 沒資料")
+        return stats
+
+    if row_spec:
+        row_numbers = [r for r in parse_row_spec(row_spec) if r <= max_row]
+        logger(f"[模式] 指定列：{row_spec} -> {row_numbers}")
+    else:
+        row_numbers = list(range(2, max_row + 1))
+        logger("[模式] 全部列")
+
+    if force:
+        logger("[選項] 強制重跑：忽略 V 欄已有值")
 
     sessions_by_region = {}
     phone_search_cache: Dict[str, List[Dict]] = {}
@@ -595,11 +605,13 @@ def main():
     pending_updates = []
 
     for row_num in row_numbers:
+        LOG_BUFFER.clear()
+
         try:
             row_values = all_values[row_num - 1]
 
-            print(f"\n===== 第 {row_num} 列 =====")
-            print("原始列資料:", row_values)
+            logger(f"\n===== 第 {row_num} 列 =====")
+            logger(f"原始列資料: {row_values}")
 
             current_order_no = safe_cell(row_values, 2)
             service_date_str = safe_cell(row_values, 8)
@@ -607,39 +619,44 @@ def main():
             current_phone = safe_cell(row_values, 15)
             sheet_status = safe_cell(row_values, 22)
 
-            print("訂單編號:", current_order_no)
-            print("服務日期:", service_date_str)
-            print("地址:", current_address)
-            print("電話:", current_phone)
-            print("V欄:", sheet_status)
+            logger(f"訂單編號: {current_order_no}")
+            logger(f"服務日期: {service_date_str}")
+            logger(f"地址: {current_address}")
+            logger(f"電話: {current_phone}")
+            logger(f"V欄: {sheet_status}")
 
             if sheet_status and not force:
-                print(f"[SKIP] 第{row_num}列 已處理 ({sheet_status})")
+                logger(f"[SKIP] 第{row_num}列 已處理 ({sheet_status})")
+                stats["skipped"] += 1
                 continue
 
             if not current_order_no or not current_address or not current_phone:
-                print(f"[SKIP] 第{row_num}列 缺少訂單編號/地址/電話")
+                logger(f"[SKIP] 第{row_num}列 缺少訂單編號/地址/電話")
+                stats["skipped"] += 1
                 continue
 
             current_service_date = parse_date(service_date_str)
             if not current_service_date:
-                print(f"[SKIP] 第{row_num}列 服務日期格式錯誤: {service_date_str}")
+                logger(f"[SKIP] 第{row_num}列 服務日期格式錯誤: {service_date_str}")
+                stats["skipped"] += 1
                 continue
 
             region = match_region_by_address(current_address)
             if not region:
-                print(f"[SKIP] 第{row_num}列 無法依地址判斷區域: {current_address}")
+                logger(f"[SKIP] 第{row_num}列 無法依地址判斷區域: {current_address}")
+                stats["skipped"] += 1
                 continue
 
             if region not in sessions_by_region:
-                log(f"[登入] {region}")
+                logger(f"[登入] {region}")
                 sessions_by_region[region] = login_backend(region)
                 time.sleep(SLEEP_SECONDS)
 
             session = sessions_by_region[region]
             phone_key = f"{region}|{normalize_phone(current_phone)}"
 
-            log(f"[處理] 第{row_num}列 | 區域={region} | 訂單={current_order_no} | 電話={current_phone}")
+            logger(f"[處理] 第{row_num}列 | 區域={region} | 訂單={current_order_no} | 電話={current_phone}")
+            stats["processed"] += 1
 
             if phone_key not in phone_search_cache:
                 phone_search_cache[phone_key] = search_orders_by_phone(session, normalize_phone(current_phone))
@@ -647,8 +664,14 @@ def main():
 
             search_results = phone_search_cache[phone_key]
             if not search_results:
-                log(f"[略過] 第{row_num}列 查無同電話訂單，不改動")
+                logger(f"[略過] 第{row_num}列 查無同電話訂單，不改動")
+                stats["skipped"] += 1
                 continue
+
+            logger("[列表頁候選]")
+            for item in search_results:
+                date_str = item.get("service_date").strftime("%Y/%m/%d") if item.get("service_date") else ""
+                logger(f"{item.get('order_no', '')} {date_str} {item.get('status', '')} {item.get('address', '')}")
 
             prev_brief = find_previous_processed_order(
                 current_order_no=current_order_no,
@@ -659,7 +682,8 @@ def main():
             )
 
             if not prev_brief:
-                log(f"[略過] 第{row_num}列 沒有上次訂單，不改動 S/T/U/V")
+                logger(f"[略過] 第{row_num}列 沒有上次訂單，不改動 S/T/U/V")
+                stats["skipped"] += 1
                 continue
 
             targets_brief = find_unprocessed_targets(
@@ -669,12 +693,13 @@ def main():
             )
 
             if not targets_brief:
-                log(f"[略過] 第{row_num}列 沒有同地址未處理訂單可回填")
+                logger(f"[略過] 第{row_num}列 沒有同地址未處理訂單可回填")
+                stats["skipped"] += 1
                 continue
 
             prev_form = None
             target_forms = []
-            need_order_nos = {prev_brief.get('order_no')} | {x.get('order_no') for x in targets_brief}
+            need_order_nos = {prev_brief.get("order_no")} | {x.get("order_no") for x in targets_brief}
 
             for item in search_results:
                 if item.get("order_no") not in need_order_nos:
@@ -698,10 +723,12 @@ def main():
                     target_forms.append(detail)
 
             if not prev_form:
-                log(f"[失敗] 第{row_num}列 找不到上一筆訂單編輯頁")
+                logger(f"[失敗] 第{row_num}列 找不到上一筆訂單編輯頁")
+                stats["failed"] += 1
+                stats["errors"].append(f"第{row_num}列：找不到上一筆訂單編輯頁")
                 pending_updates.append({
-                    "range": f"V{row_num}",
-                    "values": [["失敗"]],
+                    "range": f"V{row_num}:W{row_num}",
+                    "values": [["失敗", "\n".join(LOG_BUFFER)]],
                 })
                 continue
 
@@ -723,27 +750,35 @@ def main():
                 updated_order_nos.append(target_form.get("order_no", ""))
                 time.sleep(SLEEP_SECONDS)
 
-            pending_updates.append({
-                "range": f"S{row_num}:V{row_num}",
-                "values": [[prev_service_date, prev_order_no, prev_notice, "成功"]],
-            })
-
-            log(
+            logger(
                 f"[成功] 第{row_num}列 -> 已回填並改成已處理 {updated_count} 筆；"
                 f"上次日期 {prev_service_date} / 上次單號 {prev_order_no} / 目標 {', '.join(updated_order_nos)}"
             )
 
-        except Exception as e:
-            log(f"[失敗] 第{row_num}列: {e}")
             pending_updates.append({
-                "range": f"V{row_num}",
-                "values": [["失敗"]],
+                "range": f"S{row_num}:W{row_num}",
+                "values": [[
+                    prev_service_date,
+                    prev_order_no,
+                    prev_notice,
+                    "成功",
+                    "\n".join(LOG_BUFFER)
+                ]],
+            })
+            stats["success"] += 1
+
+        except Exception as e:
+            msg = f"[失敗] 第{row_num}列: {e}"
+            logger(msg)
+            stats["failed"] += 1
+            stats["errors"].append(msg)
+            pending_updates.append({
+                "range": f"V{row_num}:W{row_num}",
+                "values": [["失敗", "\n".join(LOG_BUFFER)]],
             })
 
     if pending_updates:
         worksheet.batch_update(pending_updates, value_input_option="RAW")
-        log(f"[完成] 已批次寫回 {len(pending_updates)} 筆 sheet 更新")
+        logger(f"[完成] 已批次寫回 {len(pending_updates)} 筆 sheet 更新")
 
-
-if __name__ == "__main__":
-    main()
+    return stats
