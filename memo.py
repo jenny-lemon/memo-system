@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime
 from urllib.parse import urljoin
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Set
 
 import gspread
 import requests
@@ -19,9 +19,6 @@ import accounts
 import env
 
 
-# =========================
-# 基本設定
-# =========================
 SHEET_ID = env.SHEET_ID
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
@@ -39,9 +36,6 @@ LOGIN_URL = f"{BASE_URL}/login"
 PURCHASE_URL = f"{BASE_URL}/purchase"
 
 
-# =========================
-# 工具
-# =========================
 def log(msg: str) -> None:
     print(msg, flush=True)
     try:
@@ -142,7 +136,32 @@ def extract_address_from_lines(lines: List[str]) -> str:
     return ""
 
 
-def parse_cli_args(argv: List[str]) -> Tuple[int, Optional[int], bool]:
+def parse_row_spec(spec: str) -> List[int]:
+    rows: Set[int] = set()
+
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+
+        if "-" in part:
+            a, b = part.split("-", 1)
+            start = int(a.strip())
+            end = int(b.strip())
+            if start > end:
+                start, end = end, start
+            for n in range(start, end + 1):
+                if n >= 2:
+                    rows.add(n)
+        else:
+            n = int(part)
+            if n >= 2:
+                rows.add(n)
+
+    return sorted(rows)
+
+
+def parse_cli_args(argv: List[str], max_row: int) -> (List[int], bool):
     force = False
     args = []
 
@@ -152,28 +171,20 @@ def parse_cli_args(argv: List[str]) -> Tuple[int, Optional[int], bool]:
         else:
             args.append(a)
 
-    if len(args) == 1:
-        start_row = int(args[0])
-        end_row = int(args[0])
-        print(f"[模式] 單筆測試：第 {start_row} 列")
-    elif len(args) == 2:
-        start_row = int(args[0])
-        end_row = int(args[1])
-        print(f"[模式] 區間測試：第 {start_row} ~ {end_row} 列")
+    if args:
+        row_spec = args[0]
+        row_numbers = [r for r in parse_row_spec(row_spec) if r <= max_row]
+        print(f"[模式] 指定列：{row_spec} -> {row_numbers}")
     else:
-        start_row = 2
-        end_row = None
-        print("[模式] 正式模式：從第 2 列開始")
+        row_numbers = list(range(2, max_row + 1))
+        print("[模式] 全部列")
 
     if force:
         print("[選項] 強制重跑：忽略 V 欄已有值")
 
-    return start_row, end_row, force
+    return row_numbers, force
 
 
-# =========================
-# 區域判斷
-# =========================
 def match_region_by_address(address: str) -> Optional[str]:
     addr = str(address or "")
     for region, cfg in accounts.ACCOUNTS.items():
@@ -183,9 +194,6 @@ def match_region_by_address(address: str) -> Optional[str]:
     return None
 
 
-# =========================
-# Google Sheet
-# =========================
 def get_google_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -209,24 +217,16 @@ def get_google_worksheet():
         sh = gc.open_by_key(SHEET_ID)
         return sh.worksheet(WORKSHEET_NAME)
     except WorksheetNotFound as e:
-        raise RuntimeError(
-            f"找不到工作表 '{WORKSHEET_NAME}'。請確認 Google Sheet 分頁名稱正確。"
-        ) from e
+        raise RuntimeError(f"找不到工作表 '{WORKSHEET_NAME}'。") from e
     except SpreadsheetNotFound as e:
-        raise RuntimeError(
-            "找不到 Spreadsheet，請確認 SHEET_ID 是否正確，且 service account 已被分享進該 Sheet。"
-        ) from e
+        raise RuntimeError("找不到 Spreadsheet，請確認 SHEET_ID 是否正確。") from e
     except APIError as e:
         client_email = creds_dict.get("client_email", "(unknown)")
         raise RuntimeError(
-            "Google Sheet API 存取失敗。"
-            f"請確認 SHEET_ID 正確，並把這個 service account 加到該 Sheet 的共用名單且給編輯權限：{client_email}"
+            f"Google Sheet API 存取失敗。請確認這個 service account 已被分享進該 Sheet 並有編輯權限：{client_email}"
         ) from e
 
 
-# =========================
-# 後台
-# =========================
 def get_soup(session: requests.Session, url: str, params=None) -> BeautifulSoup:
     resp = session.get(url, params=params, timeout=30)
     resp.raise_for_status()
@@ -318,7 +318,6 @@ def search_orders_by_phone(session: requests.Session, phone: str) -> List[Dict]:
     )
 
     items = []
-
     rows = soup.select("table tbody tr")
     if not rows:
         rows = soup.select("tr")
@@ -432,7 +431,6 @@ def parse_edit_form(session: requests.Session, edit_url: str, phone: str = "") -
 
         if tag == "textarea":
             fields[name] = el.text or ""
-
         elif tag == "select":
             selected = el.select_one("option[selected]")
             if selected is not None:
@@ -440,10 +438,8 @@ def parse_edit_form(session: requests.Session, edit_url: str, phone: str = "") -
             else:
                 first = el.select_one("option")
                 fields[name] = first.get("value", "") if first else ""
-
         else:
             input_type = (el.get("type") or "text").lower()
-
             if input_type in ("checkbox", "radio"):
                 if el.has_attr("checked"):
                     fields[name] = el.get("value", "on")
@@ -514,13 +510,7 @@ def parse_edit_form(session: requests.Session, edit_url: str, phone: str = "") -
     }
 
 
-def find_previous_processed_order(
-    current_order_no: str,
-    current_address: str,
-    current_phone: str,
-    current_service_date,
-    candidates: List[Dict],
-) -> Optional[Dict]:
+def find_previous_processed_order(current_order_no: str, current_address: str, current_phone: str, current_service_date, candidates: List[Dict]) -> Optional[Dict]:
     addr_now = normalize_text(current_address)
     phone_now = normalize_phone(current_phone)
 
@@ -528,22 +518,16 @@ def find_previous_processed_order(
     for item in candidates:
         if item.get("order_no") == current_order_no:
             continue
-
         if item.get("status") not in {"已處理", "已完成"}:
             continue
-
         if not item.get("service_date"):
             continue
-
         if current_service_date and item["service_date"] >= current_service_date:
             continue
-
         if normalize_phone(item.get("phone", "")) and normalize_phone(item.get("phone", "")) != phone_now:
             continue
-
         if not same_address(item.get("address", ""), addr_now):
             continue
-
         matched.append(item)
 
     if not matched:
@@ -553,11 +537,7 @@ def find_previous_processed_order(
     return matched[0]
 
 
-def find_unprocessed_targets(
-    current_address: str,
-    current_phone: str,
-    candidates: List[Dict],
-) -> List[Dict]:
+def find_unprocessed_targets(current_address: str, current_phone: str, candidates: List[Dict]) -> List[Dict]:
     addr_now = normalize_text(current_address)
     phone_now = normalize_phone(current_phone)
 
@@ -565,28 +545,19 @@ def find_unprocessed_targets(
     for item in candidates:
         if item.get("status") != "未處理":
             continue
-
         if normalize_phone(item.get("phone", "")) and normalize_phone(item.get("phone", "")) != phone_now:
             continue
-
         if not same_address(item.get("address", ""), addr_now):
             continue
-
         targets.append(item)
 
     targets.sort(key=lambda x: (x.get("service_date") or datetime.max, x.get("order_no", "")))
     return targets
 
 
-def submit_update_processed_with_notice(
-    session: requests.Session,
-    form_info: Dict,
-    phone: str,
-    new_notice: str,
-):
+def submit_update_processed_with_notice(session: requests.Session, form_info: Dict, phone: str, new_notice: str):
     action = form_info["action"]
     fields = dict(form_info["fields"])
-
     fields["notice"] = new_notice
     fields["progress"] = "1"
 
@@ -604,40 +575,27 @@ def submit_update_processed_with_notice(
     return resp
 
 
-def update_failed_sheet(worksheet, row_num: int):
-    worksheet.update(
-        range_name=f"V{row_num}",
-        values=[["失敗"]],
-        value_input_option="RAW",
-    )
-
-
 def main():
     print(f"[環境] ENV={ENV_NAME} | BASE_URL={BASE_URL}")
     worksheet = get_google_worksheet()
 
-    start_row, end_row, force = parse_cli_args(sys.argv[1:])
-    if end_row is None:
-        end_row = worksheet.row_count
-
-    # 一次讀整張表，避免每列都 row_values() 造成 429
+    # 一次讀完整張表
     all_values = worksheet.get_all_values()
+    max_row = len(all_values)
 
-    if not all_values or len(all_values) < 2:
+    if max_row < 2:
         log("sheet 沒資料")
         return
+
+    row_numbers, force = parse_cli_args(sys.argv[1:], max_row)
 
     sessions_by_region = {}
     phone_search_cache: Dict[str, List[Dict]] = {}
     detail_cache: Dict[str, Dict] = {}
     pending_updates = []
 
-    for row_num in range(max(2, start_row), end_row + 1):
+    for row_num in row_numbers:
         try:
-            if row_num - 1 >= len(all_values):
-                print(f"[SKIP] 第{row_num}列 超出資料範圍")
-                continue
-
             row_values = all_values[row_num - 1]
 
             print(f"\n===== 第 {row_num} 列 =====")
@@ -692,11 +650,6 @@ def main():
                 log(f"[略過] 第{row_num}列 查無同電話訂單，不改動")
                 continue
 
-            print("[列表頁候選]")
-            for item in search_results:
-                date_str = item.get("service_date").strftime("%Y/%m/%d") if item.get("service_date") else ""
-                print(item.get("order_no", ""), date_str, item.get("status", ""), item.get("address", ""))
-
             prev_brief = find_previous_processed_order(
                 current_order_no=current_order_no,
                 current_address=current_address,
@@ -721,7 +674,7 @@ def main():
 
             prev_form = None
             target_forms = []
-            need_order_nos = {prev_brief.get("order_no")} | {x.get("order_no") for x in targets_brief}
+            need_order_nos = {prev_brief.get('order_no')} | {x.get('order_no') for x in targets_brief}
 
             for item in search_results:
                 if item.get("order_no") not in need_order_nos:
@@ -787,12 +740,8 @@ def main():
                 "values": [["失敗"]],
             })
 
-    # 最後一次批次寫回，避免大量 write request
     if pending_updates:
-        worksheet.batch_update(
-            pending_updates,
-            value_input_option="RAW",
-        )
+        worksheet.batch_update(pending_updates, value_input_option="RAW")
         log(f"[完成] 已批次寫回 {len(pending_updates)} 筆 sheet 更新")
 
 
