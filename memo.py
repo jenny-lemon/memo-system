@@ -18,9 +18,6 @@ import accounts
 import env
 
 
-# =========================
-# 基本設定
-# =========================
 SHEET_ID = env.SHEET_ID
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
@@ -40,9 +37,6 @@ PURCHASE_URL = f"{BASE_URL}/purchase"
 LOG_BUFFER: List[str] = []
 
 
-# =========================
-# 工具
-# =========================
 def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
     def _log(msg: str) -> None:
         print(msg, flush=True)
@@ -169,9 +163,6 @@ def parse_row_spec(spec: str) -> List[int]:
     return sorted(rows)
 
 
-# =========================
-# 區域判斷
-# =========================
 def match_region_by_address(address: str) -> Optional[str]:
     addr = str(address or "")
     for region, cfg in accounts.ACCOUNTS.items():
@@ -181,9 +172,6 @@ def match_region_by_address(address: str) -> Optional[str]:
     return None
 
 
-# =========================
-# Google Sheet
-# =========================
 def get_google_worksheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -217,9 +205,6 @@ def get_google_worksheet():
         ) from e
 
 
-# =========================
-# 後台
-# =========================
 def get_soup(session: requests.Session, url: str, params=None) -> BeautifulSoup:
     resp = session.get(url, params=params, timeout=30)
     resp.raise_for_status()
@@ -499,6 +484,7 @@ def parse_edit_form(session: requests.Session, edit_url: str, phone: str = "") -
         "phone": form_phone.strip(),
         "service_date": service_date,
         "notice": notice_value,
+        "progress": str(fields.get("progress", "")).strip(),
         "edit_url": edit_url,
     }
 
@@ -566,6 +552,23 @@ def submit_update_processed_with_notice(session: requests.Session, form_info: Di
     )
     resp.raise_for_status()
     return resp
+
+
+def verify_target_updated(
+    session: requests.Session,
+    edit_url: str,
+    phone: str,
+    expected_notice: str,
+    expected_progress: str = "1",
+):
+    verified_form = parse_edit_form(session, edit_url, phone)
+    actual_notice = (verified_form.get("notice") or "").strip()
+    actual_progress = str(verified_form.get("progress") or "").strip()
+
+    notice_ok = actual_notice == (expected_notice or "").strip()
+    progress_ok = actual_progress == expected_progress
+
+    return notice_ok and progress_ok, verified_form
 
 
 def main(row_spec: Optional[str] = None, force: bool = False, ui_logger: Optional[Callable[[str], None]] = None):
@@ -737,35 +740,88 @@ def main(row_spec: Optional[str] = None, force: bool = False, ui_logger: Optiona
             prev_order_no = prev_brief.get("order_no", "").strip()
 
             updated_count = 0
+            verified_count = 0
             updated_order_nos = []
+            failed_targets = []
 
             for target_form in target_forms:
-                submit_update_processed_with_notice(
-                    session=session,
-                    form_info=target_form,
-                    phone=normalize_phone(current_phone),
-                    new_notice=prev_notice,
+                target_order_no = target_form.get("order_no", "")
+                target_edit_url = target_form.get("edit_url", "")
+
+                try:
+                    submit_update_processed_with_notice(
+                        session=session,
+                        form_info=target_form,
+                        phone=normalize_phone(current_phone),
+                        new_notice=prev_notice,
+                    )
+                    time.sleep(SLEEP_SECONDS)
+
+                    updated_count += 1
+                    updated_order_nos.append(target_order_no)
+
+                    ok, verified_form = verify_target_updated(
+                        session=session,
+                        edit_url=target_edit_url,
+                        phone=normalize_phone(current_phone),
+                        expected_notice=prev_notice,
+                        expected_progress="1",
+                    )
+                    time.sleep(SLEEP_SECONDS)
+
+                    if ok:
+                        verified_count += 1
+                        logger(f"[驗證成功] {target_order_no} 已完成備註回寫且狀態為已處理")
+                    else:
+                        actual_notice = (verified_form.get("notice") or "").strip()
+                        actual_progress = str(verified_form.get("progress") or "").strip()
+                        failed_targets.append(target_order_no)
+                        logger(
+                            f"[驗證失敗] {target_order_no} notice或progress不符 "
+                            f"(actual_progress={actual_progress}, actual_notice_head={actual_notice[:30]})"
+                        )
+
+                except Exception as e:
+                    failed_targets.append(target_order_no)
+                    logger(f"[送出失敗] {target_order_no}: {e}")
+
+            # 只有全部目標都驗證成功才算成功
+            if target_forms and verified_count == len(target_forms):
+                logger(
+                    f"[成功] 第{row_num}列 -> 已完成備註回寫 {verified_count} 筆；"
+                    f"上次日期 {prev_service_date} / 上次單號 {prev_order_no} / 目標 {', '.join(updated_order_nos)}"
                 )
-                updated_count += 1
-                updated_order_nos.append(target_form.get("order_no", ""))
-                time.sleep(SLEEP_SECONDS)
 
-            logger(
-                f"[成功] 第{row_num}列 -> 已回填並改成已處理 {updated_count} 筆；"
-                f"上次日期 {prev_service_date} / 上次單號 {prev_order_no} / 目標 {', '.join(updated_order_nos)}"
-            )
-
-            pending_updates.append({
-                "range": f"S{row_num}:W{row_num}",
-                "values": [[
-                    prev_service_date,
-                    prev_order_no,
-                    prev_notice,
-                    "成功",
-                    "\n".join(LOG_BUFFER)
-                ]],
-            })
-            stats["success"] += 1
+                pending_updates.append({
+                    "range": f"S{row_num}:W{row_num}",
+                    "values": [[
+                        prev_service_date,
+                        prev_order_no,
+                        prev_notice,
+                        "成功",
+                        "\n".join(LOG_BUFFER)
+                    ]],
+                })
+                stats["success"] += 1
+            else:
+                logger(
+                    f"[失敗] 第{row_num}列 -> 備註回寫未完整成功；"
+                    f"已送出 {updated_count} 筆 / 驗證成功 {verified_count} 筆 / 失敗目標 {', '.join(failed_targets)}"
+                )
+                stats["failed"] += 1
+                stats["errors"].append(
+                    f"第{row_num}列：回寫未完整成功，已送出 {updated_count} 筆，驗證成功 {verified_count} 筆，失敗目標 {', '.join(failed_targets)}"
+                )
+                pending_updates.append({
+                    "range": f"S{row_num}:W{row_num}",
+                    "values": [[
+                        prev_service_date,
+                        prev_order_no,
+                        prev_notice,
+                        "失敗",
+                        "\n".join(LOG_BUFFER)
+                    ]],
+                })
 
         except Exception as e:
             msg = f"[失敗] 第{row_num}列: {e}"
