@@ -214,7 +214,7 @@ def get_google_worksheet():
         ) from e
     except SpreadsheetNotFound as e:
         raise RuntimeError(
-            f"找不到 Spreadsheet，請確認 SHEET_ID 是否正確，且 service account 已被分享進該 Sheet。"
+            "找不到 Spreadsheet，請確認 SHEET_ID 是否正確，且 service account 已被分享進該 Sheet。"
         ) from e
     except APIError as e:
         client_email = creds_dict.get("client_email", "(unknown)")
@@ -604,13 +604,6 @@ def submit_update_processed_with_notice(
     return resp
 
 
-def update_success_sheet(worksheet, row_num: int, prev_service_date: str, prev_order_no: str, prev_notice: str):
-    worksheet.batch_update([{
-        "range": f"S{row_num}:V{row_num}",
-        "values": [[prev_service_date, prev_order_no, prev_notice, "成功"]],
-    }], value_input_option="RAW")
-
-
 def update_failed_sheet(worksheet, row_num: int):
     worksheet.update(
         range_name=f"V{row_num}",
@@ -627,13 +620,25 @@ def main():
     if end_row is None:
         end_row = worksheet.row_count
 
+    # 一次讀整張表，避免每列都 row_values() 造成 429
+    all_values = worksheet.get_all_values()
+
+    if not all_values or len(all_values) < 2:
+        log("sheet 沒資料")
+        return
+
     sessions_by_region = {}
     phone_search_cache: Dict[str, List[Dict]] = {}
     detail_cache: Dict[str, Dict] = {}
+    pending_updates = []
 
     for row_num in range(max(2, start_row), end_row + 1):
         try:
-            row_values = worksheet.row_values(row_num)
+            if row_num - 1 >= len(all_values):
+                print(f"[SKIP] 第{row_num}列 超出資料範圍")
+                continue
+
+            row_values = all_values[row_num - 1]
 
             print(f"\n===== 第 {row_num} 列 =====")
             print("原始列資料:", row_values)
@@ -741,7 +746,10 @@ def main():
 
             if not prev_form:
                 log(f"[失敗] 第{row_num}列 找不到上一筆訂單編輯頁")
-                update_failed_sheet(worksheet, row_num)
+                pending_updates.append({
+                    "range": f"V{row_num}",
+                    "values": [["失敗"]],
+                })
                 continue
 
             prev_notice = prev_form.get("notice", "").strip()
@@ -762,13 +770,10 @@ def main():
                 updated_order_nos.append(target_form.get("order_no", ""))
                 time.sleep(SLEEP_SECONDS)
 
-            update_success_sheet(
-                worksheet=worksheet,
-                row_num=row_num,
-                prev_service_date=prev_service_date,
-                prev_order_no=prev_order_no,
-                prev_notice=prev_notice,
-            )
+            pending_updates.append({
+                "range": f"S{row_num}:V{row_num}",
+                "values": [[prev_service_date, prev_order_no, prev_notice, "成功"]],
+            })
 
             log(
                 f"[成功] 第{row_num}列 -> 已回填並改成已處理 {updated_count} 筆；"
@@ -777,10 +782,18 @@ def main():
 
         except Exception as e:
             log(f"[失敗] 第{row_num}列: {e}")
-            try:
-                update_failed_sheet(worksheet, row_num)
-            except Exception as e2:
-                log(f"[警告] 第{row_num}列 寫入失敗狀態失敗: {e2}")
+            pending_updates.append({
+                "range": f"V{row_num}",
+                "values": [["失敗"]],
+            })
+
+    # 最後一次批次寫回，避免大量 write request
+    if pending_updates:
+        worksheet.batch_update(
+            pending_updates,
+            value_input_option="RAW",
+        )
+        log(f"[完成] 已批次寫回 {len(pending_updates)} 筆 sheet 更新")
 
 
 if __name__ == "__main__":
