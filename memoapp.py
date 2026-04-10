@@ -22,6 +22,18 @@ if "last_result" not in st.session_state:
         "errors": [],
     }
 
+
+def reset_run_state():
+    st.session_state.logs = []
+    st.session_state.last_result = {
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+
 # ========================
 # 環境
 # ========================
@@ -65,7 +77,6 @@ with col2:
             "password": "",
             "address_keywords": ["台中"],
         }
-
     st.markdown("#### 台中")
     accounts.ACCOUNTS["台中"]["email"] = st.text_input(
         "台中 Email",
@@ -91,6 +102,13 @@ mode = st.radio(
         "直接輸入電話號碼模式",
         "搜尋條件模式",
     ],
+    horizontal=True,
+)
+
+# 單選地區
+region = st.radio(
+    "地區",
+    ["台北", "台中"],
     horizontal=True,
 )
 
@@ -122,8 +140,8 @@ run = st.button("🚀 執行", use_container_width=True)
 # 執行過程
 # ========================
 st.subheader("4. 執行過程")
-
 log_placeholder = st.empty()
+
 
 def render_logs():
     if st.session_state.logs:
@@ -131,9 +149,11 @@ def render_logs():
     else:
         log_placeholder.code("尚未執行")
 
+
 def ui_log(msg: str):
     st.session_state.logs.append(str(msg))
     log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
+
 
 render_logs()
 
@@ -141,27 +161,36 @@ render_logs()
 # 執行結果
 # ========================
 st.subheader("5. 執行結果")
+metrics_placeholder = st.empty()
+errors_placeholder = st.empty()
 
-m1, m2, m3, m4 = st.columns(4)
-last = st.session_state.last_result
 
-m1.metric("執行筆數", last.get("processed", 0))
-m2.metric("成功", last.get("success", 0))
-m3.metric("失敗", last.get("failed", 0))
-m4.metric("略過", last.get("skipped", 0))
+def render_result():
+    last = st.session_state.last_result
+    with metrics_placeholder.container():
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("執行筆數", last.get("processed", 0))
+        m2.metric("成功", last.get("success", 0))
+        m3.metric("失敗", last.get("failed", 0))
+        m4.metric("略過", last.get("skipped", 0))
+
+    with errors_placeholder.container():
+        errors = last.get("errors", [])
+        if errors:
+            st.subheader("6. 失敗明細")
+            for err in errors:
+                st.error(err)
+
+
+render_result()
 
 # ========================
 # 執行
 # ========================
 if run:
-    st.session_state.logs = []
-    st.session_state.last_result = {
-        "processed": 0,
-        "success": 0,
-        "failed": 0,
-        "skipped": 0,
-        "errors": [],
-    }
+    reset_run_state()
+    render_logs()
+    render_result()
 
     ui_log("準備執行中...")
 
@@ -175,22 +204,19 @@ if run:
         elif mode == "直接輸入電話號碼模式":
             result = memo.main_by_phone(
                 phone=phone,
+                region=region,
                 ui_logger=ui_log,
             )
         else:
             result = memo.main_by_conditions(
                 date_s=date_s,
                 limit=int(limit),
+                region=region,
                 ui_logger=ui_log,
             )
 
         st.session_state.last_result = result
-
-        m1.metric("執行筆數", result.get("processed", 0))
-        m2.metric("成功", result.get("success", 0))
-        m3.metric("失敗", result.get("failed", 0))
-        m4.metric("略過", result.get("skipped", 0))
-
+        render_result()
         ui_log("執行完成")
         st.success("執行完成")
 
@@ -204,21 +230,5 @@ if run:
             "skipped": 0,
             "errors": [str(e)],
         }
-
-        m1.metric("執行筆數", 0)
-        m2.metric("成功", 0)
-        m3.metric("失敗", 1)
-        m4.metric("略過", 0)
-
-        st.error(err)
-
-# ========================
-# 失敗明細
-# ========================
-final_result = st.session_state.last_result or {}
-errors = final_result.get("errors", [])
-
-if errors:
-    st.subheader("6. 失敗明細")
-    for err in errors:
+        render_result()
         st.error(err)
