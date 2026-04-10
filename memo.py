@@ -300,7 +300,7 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
             "isCharge": "",
             "isRefund": "",
             "payway": "",
-            "purchase_status": "1",   # 已付款
+            "purchase_status": "1",
             "progress_status": "",
             "invoiceStatus": "",
             "otherFee": "",
@@ -313,16 +313,9 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
 
 
 # ========================
-# 搜尋：訂購日期 + 非取消 + 未處理
+# 搜尋：訂購日期 + 已付款 + 未處理
 # ========================
 def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
-    """
-    條件：
-    - 訂購日期 = date_s
-    - 付款狀態非取消 => 這裡用 purchase_status 不放 2
-      實務上後台列表通常不能直接表達 != 2，所以先查當日未處理，再在解析結果排除 status=取消訂單
-    - 服務狀態未處理 => progress_status=0
-    """
     r = session.get(
         PURCHASE_URL,
         params={
@@ -343,8 +336,8 @@ def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
             "isCharge": "",
             "isRefund": "",
             "payway": "",
-            "purchase_status": "",
-            "progress_status": "0",   # 未處理
+            "purchase_status": "1",
+            "progress_status": "0",
             "invoiceStatus": "",
             "otherFee": "",
             "orderBy": "",
@@ -357,10 +350,9 @@ def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
 
     filtered = []
     for item in items:
-        # 排除取消
-        if item.get("purchase_status_name") == "取消訂單":
+        if item.get("purchase_status") != "1":
             continue
-        if item.get("status") != "未處理":
+        if item.get("status_code") != "0":
             continue
         filtered.append(item)
 
@@ -398,26 +390,34 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
             date_obj = parse_date(date_match.group(1))
 
         status = ""
+        status_code = ""
         if "未處理" in txt:
             status = "未處理"
+            status_code = "0"
         elif "已處理" in txt:
             status = "已處理"
+            status_code = "1"
         elif "已完成" in txt:
             status = "已完成"
+            status_code = "2"
 
         purchase_status_name = ""
+        purchase_status = ""
         if "待付款" in txt:
             purchase_status_name = "待付款"
+            purchase_status = "0"
         elif "已付款" in txt:
             purchase_status_name = "已付款"
+            purchase_status = "1"
         elif "取消訂單" in txt:
             purchase_status_name = "取消訂單"
+            purchase_status = "2"
         elif "已退款" in txt:
             purchase_status_name = "已退款"
+            purchase_status = "3"
 
         address = extract_address_from_text_block(txt)
 
-        # 嘗試抓電話
         phone = ""
         m_phone = re.search(r"(09\d{8})", txt)
         if m_phone:
@@ -431,11 +431,12 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
             "date_str": date_str,
             "date_obj": date_obj,
             "status": status,
+            "status_code": status_code,
             "address": address,
             "phone": phone,
             "edit_url": edit_url,
             "purchase_status_name": purchase_status_name,
-            "purchase_status": "1" if purchase_status_name == "已付款" else "",
+            "purchase_status": purchase_status,
         })
 
     dedup = {}
@@ -511,7 +512,6 @@ def parse_edit_page(session, edit_url, phone=""):
     if m:
         order_no = m.group(1)
 
-    # 補抓姓名、地址、電話
     customer_name = str(fields.get("name", "") or fields.get("customer_name", "") or "").strip()
     phone_value = str(fields.get("phone", "")).strip()
     address_value = str(fields.get("address", "")).strip()
@@ -541,7 +541,7 @@ def find_previous_processed(current_order_no, current_address, current_phone, cu
             continue
         if x.get("purchase_status") != "1":
             continue
-        if x["status"] not in ("已處理", "已完成"):
+        if x.get("status_code") not in ("1", "2"):
             continue
         if not x["date_obj"]:
             continue
@@ -549,7 +549,7 @@ def find_previous_processed(current_order_no, current_address, current_phone, cu
             continue
         if not same_address(x["address"], current_address):
             continue
-        if current_phone and x.get("phone") and normalize_phone(x.get("phone")) != normalize_phone(current_phone):
+        if current_phone and x.get("phone") and normalize_phone(x["phone"]) != normalize_phone(current_phone):
             continue
         matched.append(x)
 
@@ -565,11 +565,11 @@ def find_current_unprocessed_same_address(current_order_no, current_address, cur
     for x in items:
         if x["order_no"] != current_order_no:
             continue
-        if x["status"] != "未處理":
+        if x.get("status_code") != "0":
             continue
         if not same_address(x["address"], current_address):
             continue
-        if current_phone and x.get("phone") and normalize_phone(x.get("phone")) != normalize_phone(current_phone):
+        if current_phone and x.get("phone") and normalize_phone(x["phone"]) != normalize_phone(current_phone):
             continue
         targets.append(x)
     return targets
@@ -644,8 +644,8 @@ def apply_sheet_presentation(ws, updated_rows: List[int]):
             "range": {
                 "sheetId": sheet_id,
                 "startRowIndex": 1,
-                "startColumnIndex": 22,  # W
-                "endColumnIndex": 24,    # X
+                "startColumnIndex": 22,
+                "endColumnIndex": 24,
             },
             "cell": {
                 "userEnteredFormat": {
@@ -698,7 +698,7 @@ def append_log_row(
 
 
 # ========================
-# 單筆處理核心（供兩種模式共用）
+# 單筆處理核心
 # ========================
 def process_single_case(
     session,
@@ -811,6 +811,39 @@ def process_single_case(
         "prev_notice": prev_notice,
         "error": f"已送出 {submit_ok} 筆，驗證成功 {verify_ok} 筆，失敗目標：{', '.join(failed_targets)}",
     }
+
+
+# ========================
+# 電話模式配對
+# ========================
+def find_phone_mode_targets(items):
+    by_address = {}
+    for item in items:
+        key = normalize_text(item["address"])
+        if not key:
+            continue
+        by_address.setdefault(key, []).append(item)
+
+    groups = []
+    for _, address_items in by_address.items():
+        unprocessed = [x for x in address_items if x.get("status_code") == "0" and x["date_obj"]]
+        processed = [x for x in address_items if x.get("purchase_status") == "1" and x.get("status_code") in ("1", "2") and x["date_obj"]]
+
+        if not unprocessed or not processed:
+            continue
+
+        unprocessed.sort(key=lambda x: x["date_obj"])
+        processed.sort(key=lambda x: x["date_obj"], reverse=True)
+
+        for target in unprocessed:
+            prev = next((p for p in processed if p["date_obj"] < target["date_obj"]), None)
+            if prev:
+                groups.append({
+                    "target": target,
+                    "prev": prev,
+                })
+
+    return groups
 
 
 # ========================
@@ -957,7 +990,7 @@ def main(row_spec="2", force=False, ui_logger=None):
 
 
 # ========================
-# 電話模式（不回寫主 sheet，但寫 log sheet）
+# 電話模式
 # ========================
 def main_by_phone(phone, ui_logger=None):
     CURRENT_ROW_LOGS.clear()
@@ -1094,7 +1127,7 @@ def main_by_phone(phone, ui_logger=None):
 
 
 # ========================
-# 搜尋條件模式（不回寫主 sheet，但寫 log sheet）
+# 搜尋條件模式
 # ========================
 def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
     CURRENT_ROW_LOGS.clear()
@@ -1112,7 +1145,7 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
 
     log("\n===== BY搜尋條件 =====")
     log(f"訂購日期: {date_s}")
-    log(f"條件: 付款狀態非取消 + 服務狀態未處理 + 每次只跑 {limit} 筆")
+    log(f"條件: 付款狀態=已付款 + 服務狀態=未處理 + 每次只跑 {limit} 筆")
 
     sessions = {}
     region_order = ["台北", "台中"]
@@ -1141,7 +1174,6 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
         )
         return result
 
-    # 控制每次只跑 X 筆
     all_targets = all_targets[:limit]
 
     log("\n[搜尋結果]")
@@ -1153,7 +1185,7 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
 
     for idx, target in enumerate(all_targets, start=1):
         try:
-            CURRENT_ROW_LOGS.append("")  # 保留段落間隔
+            CURRENT_ROW_LOGS.append("")
             log(f"\n===== 處理第 {idx} 筆 =====")
             log(f"[目標單] {target['order_no']} {target['date_str']} {target['status']} {target['address']} {target['region']}")
 
