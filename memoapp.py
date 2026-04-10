@@ -25,7 +25,7 @@ log_box = st.empty()
 
 def render_logs():
     if st.session_state.logs:
-        log_box.code("\n".join(st.session_state.logs[-1000:]))
+        log_box.code("\n".join(st.session_state.logs[-2000:]))
     else:
         log_box.code("尚未執行")
 
@@ -104,15 +104,15 @@ row_spec = ""
 phone = ""
 date_s = ""
 limit = 10
+force = False
 
 if mode == "Google Sheet列號模式":
     row_spec = st.text_input("列號", "2,3,5-8")
     force = st.checkbox("強制重跑", value=False)
-else:
-    force = False
 
-if mode == "直接輸入電話號碼模式":
+elif mode == "直接輸入電話號碼模式":
     phone = st.text_input("電話號碼", "")
+
 elif mode == "搜尋條件模式":
     col_a, col_b = st.columns(2)
     with col_a:
@@ -124,7 +124,7 @@ elif mode == "搜尋條件模式":
 
 
 # ========================
-# 執行按鈕
+# 執行
 # ========================
 run = st.button("🚀 執行", use_container_width=True)
 
