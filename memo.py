@@ -560,18 +560,18 @@ def find_previous_processed(current_order_no, current_address, current_phone, cu
     return matched[0]
 
 
-def find_current_unprocessed_same_address(current_order_no, current_address, current_phone, items):
+def find_all_unprocessed_same_address(current_address, current_phone, items):
     targets = []
     for x in items:
-        if x["order_no"] != current_order_no:
-            continue
         if x.get("status_code") != "0":
             continue
-        if not same_address(x["address"], current_address):
+        if not same_address(x.get("address", ""), current_address):
             continue
         if current_phone and x.get("phone") and normalize_phone(x["phone"]) != normalize_phone(current_phone):
             continue
         targets.append(x)
+
+    targets.sort(key=lambda k: (k.get("date_obj") or datetime.max, k.get("order_no", "")))
     return targets
 
 
@@ -734,7 +734,7 @@ def process_single_case(
             "error": "沒有上一筆",
         }
 
-    targets = find_current_unprocessed_same_address(order, addr, phone, items)
+    targets = find_all_unprocessed_same_address(addr, phone, items)
     if not targets:
         log("❌ 沒有未處理目標單")
         return {
@@ -746,6 +746,7 @@ def process_single_case(
         }
 
     log(f"\n[上一筆] {prev['order_no']} {prev['date_str']} {prev['status']} {prev['address']}")
+    log(f"[本次共更新] {len(targets)} 筆未處理訂單")
 
     prev_form = parse_edit_page(session, prev["edit_url"], phone)
     prev_notice = str(prev_form.get("notice", "")).strip()
@@ -1080,32 +1081,45 @@ def main_by_phone(phone, ui_logger=None):
                 )
                 continue
 
-            target_form = parse_edit_page(found_session, target["edit_url"], phone)
-            submit_update(found_session, target_form, phone, prev_notice)
-            time.sleep(SLEEP_SECONDS)
+            same_address_unprocessed = find_all_unprocessed_same_address(target["address"], phone, items)
+            log(f"[本次共更新] {len(same_address_unprocessed)} 筆未處理訂單")
 
-            ok, verified_form = verify_update(found_session, target["edit_url"], phone, prev_notice)
-            time.sleep(SLEEP_SECONDS)
+            group_ok = 0
+            group_fail = []
 
-            if ok:
-                log(f"✅ 驗證成功 {target['order_no']}")
+            for t in same_address_unprocessed:
+                log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['status']} {t['address']}")
+                target_form = parse_edit_page(found_session, t["edit_url"], phone)
+                submit_update(found_session, target_form, phone, prev_notice)
+                time.sleep(SLEEP_SECONDS)
+
+                ok, verified_form = verify_update(found_session, t["edit_url"], phone, prev_notice)
+                time.sleep(SLEEP_SECONDS)
+
+                if ok:
+                    log(f"✅ 驗證成功 {t['order_no']}")
+                    group_ok += 1
+                else:
+                    log(
+                        f"❌ 驗證失敗 {t['order_no']} "
+                        f"(progress={verified_form.get('progress','')}, "
+                        f"notice_head={str(verified_form.get('notice',''))[:30]})"
+                    )
+                    group_fail.append(t["order_no"])
+
+            if not group_fail:
                 success_count += 1
                 append_log_row(
-                    log_ws, "BY電話", phone, phone, verified_form.get("customer_name", ""), target["address"],
+                    log_ws, "BY電話", phone, phone, prev_form.get("customer_name", ""), target["address"],
                     target["order_no"], target["date_str"], prev["order_no"], prev["date_str"], prev_notice,
                     "成功", "", "\n".join(CURRENT_ROW_LOGS)
                 )
             else:
-                log(
-                    f"❌ 驗證失敗 {target['order_no']} "
-                    f"(progress={verified_form.get('progress','')}, "
-                    f"notice_head={str(verified_form.get('notice',''))[:30]})"
-                )
                 failed_count += 1
                 append_log_row(
-                    log_ws, "BY電話", phone, phone, verified_form.get("customer_name", ""), target["address"],
+                    log_ws, "BY電話", phone, phone, prev_form.get("customer_name", ""), target["address"],
                     target["order_no"], target["date_str"], prev["order_no"], prev["date_str"], prev_notice,
-                    "失敗", "送出後驗證失敗", "\n".join(CURRENT_ROW_LOGS)
+                    "失敗", f"失敗目標：{', '.join(group_fail)}", "\n".join(CURRENT_ROW_LOGS)
                 )
 
         except Exception as e:
@@ -1121,7 +1135,7 @@ def main_by_phone(phone, ui_logger=None):
     result["failed"] = failed_count
 
     if failed_count > 0:
-        result["errors"].append(f"成功 {success_count} 筆，失敗 {failed_count} 筆")
+        result["errors"].append(f"成功 {success_count} 組，失敗 {failed_count} 組")
 
     return result
 
@@ -1228,16 +1242,33 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
             if not prev_notice:
                 raise RuntimeError("上一筆找不到客服備註")
 
-            submit_update(session, target_form, target_phone, prev_notice)
-            time.sleep(SLEEP_SECONDS)
+            same_address_unprocessed = find_all_unprocessed_same_address(target_addr, target_phone, items)
+            log(f"[本次共更新] {len(same_address_unprocessed)} 筆未處理訂單")
 
-            ok, verified_form = verify_update(session, target["edit_url"], target_phone, prev_notice)
-            time.sleep(SLEEP_SECONDS)
+            group_fail = []
+            for t in same_address_unprocessed:
+                log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['status']} {t['address']}")
+                tf = parse_edit_page(session, t["edit_url"], target_phone)
+                submit_update(session, tf, target_phone, prev_notice)
+                time.sleep(SLEEP_SECONDS)
 
-            if not ok:
-                raise RuntimeError("送出後驗證失敗")
+                ok, verified_form = verify_update(session, t["edit_url"], target_phone, prev_notice)
+                time.sleep(SLEEP_SECONDS)
 
-            log(f"✅ 驗證成功 {target['order_no']}")
+                if ok:
+                    log(f"✅ 驗證成功 {t['order_no']}")
+                else:
+                    log(
+                        f"❌ 驗證失敗 {t['order_no']} "
+                        f"(progress={verified_form.get('progress','')}, "
+                        f"notice_head={str(verified_form.get('notice',''))[:30]})"
+                    )
+                    group_fail.append(t["order_no"])
+
+            if group_fail:
+                raise RuntimeError(f"失敗目標：{', '.join(group_fail)}")
+
+            log(f"✅ 成功：已回填 {len(same_address_unprocessed)} 筆")
             success_count += 1
 
             append_log_row(
