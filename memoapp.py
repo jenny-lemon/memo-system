@@ -26,6 +26,7 @@ if "last_result" not in st.session_state:
 # =========================
 log_box = st.empty()
 
+
 def ui_logger(message: str):
     st.session_state.live_logs.append(message)
     log_box.code("\n".join(st.session_state.live_logs[-500:]))
@@ -120,7 +121,6 @@ st.subheader("4. 執行結果")
 
 metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
 
-# 先顯示舊結果或空值
 last_result = st.session_state.last_result or {
     "processed": 0,
     "success": 0,
@@ -134,7 +134,6 @@ metric_col2.metric("完成筆數", last_result.get("success", 0))
 metric_col3.metric("失敗筆數", last_result.get("failed", 0))
 metric_col4.metric("略過筆數", last_result.get("skipped", 0))
 
-# 顯示既有 log
 if st.session_state.live_logs:
     log_box.code("\n".join(st.session_state.live_logs[-500:]))
 
@@ -143,7 +142,6 @@ if run_btn:
     st.session_state.last_result = None
     log_box.code("準備執行中...\n")
 
-    # 將畫面輸入值覆寫回 accounts
     if "台北" in accounts.ACCOUNTS:
         accounts.ACCOUNTS["台北"]["email"] = taipei_email
         accounts.ACCOUNTS["台北"]["password"] = taipei_password
