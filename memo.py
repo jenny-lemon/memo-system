@@ -260,7 +260,7 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
             "isCharge": "",
             "isRefund": "",
             "payway": "",
-            "purchase_status": "1",   # 已付款
+            "purchase_status": "1",
             "progress_status": "",
             "invoiceStatus": "",
             "otherFee": "",
@@ -322,7 +322,7 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
 
 
 # ========================
-# 解析編輯頁
+# 解析編輯頁（完整表單）
 # ========================
 def parse_edit_page(session, edit_url, phone=""):
     params = {"phone": phone} if phone else None
@@ -334,7 +334,10 @@ def parse_edit_page(session, edit_url, phone=""):
     if not form:
         raise RuntimeError(f"找不到表單: {edit_url}")
 
+    action = build_absolute_url(form.get("action") or edit_url)
+
     fields = {}
+
     for el in form.select("input, textarea, select"):
         name = el.get("name")
         if not name:
@@ -355,17 +358,24 @@ def parse_edit_page(session, edit_url, phone=""):
 
         else:
             input_type = (el.get("type") or "text").lower()
+
             if input_type in ("checkbox", "radio"):
                 if el.has_attr("checked"):
                     fields[name] = el.get("value", "on")
             else:
                 fields[name] = el.get("value", "")
 
+    # 保底 token
+    if "_token" not in fields:
+        token_el = soup.select_one("input[name=_token]")
+        if token_el:
+            fields["_token"] = token_el.get("value", "")
+
     notice = ""
     notice_el = soup.select_one('textarea[name="notice"]')
     if notice_el:
         notice = notice_el.text.strip()
-    elif "notice" in fields:
+    else:
         notice = str(fields.get("notice", "")).strip()
 
     page_text = soup.get_text("\n", strip=True)
@@ -376,7 +386,6 @@ def parse_edit_page(session, edit_url, phone=""):
         order_no = m.group(1)
 
     progress = str(fields.get("progress", "")).strip()
-    action = build_absolute_url(form.get("action") or edit_url)
 
     return {
         "action": action,
@@ -432,14 +441,19 @@ def find_current_unprocessed_same_address(current_order_no, current_address, cur
 def submit_update(session, form_info, phone, new_notice):
     action = form_info["action"]
     fields = dict(form_info["fields"])
+
+    # 只覆蓋真正要改的欄位
     fields["notice"] = new_notice
     fields["progress"] = "1"
 
     resp = session.post(
         action,
         params={"phone": phone} if phone else None,
-        files={k: (None, str(v)) for k, v in fields.items()},
-        headers={"Referer": form_info["edit_url"]},
+        data=fields,   # 關鍵：用 data，不用 files
+        headers={
+            "Referer": form_info["edit_url"],
+            "User-Agent": "Mozilla/5.0",
+        },
         timeout=30,
         allow_redirects=True,
     )
@@ -482,7 +496,6 @@ def apply_sheet_presentation(ws, updated_rows: List[int]):
             }
         })
 
-    # W:X 使用裁切，不撐高
     requests_body.append({
         "repeatCell": {
             "range": {
