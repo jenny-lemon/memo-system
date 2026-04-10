@@ -25,7 +25,7 @@ log_box = st.empty()
 
 def render_logs():
     if st.session_state.logs:
-        log_box.code("\n".join(st.session_state.logs[-2000:]))
+        log_box.code("\n".join(st.session_state.logs[-3000:]))
     else:
         log_box.code("尚未執行")
 
@@ -63,11 +63,13 @@ with col1:
     accounts.ACCOUNTS["台北"]["email"] = st.text_input(
         "台北 Email",
         value=accounts.ACCOUNTS.get("台北", {}).get("email", ""),
+        key="taipei_email",
     )
     accounts.ACCOUNTS["台北"]["password"] = st.text_input(
         "台北 Password",
         value=accounts.ACCOUNTS.get("台北", {}).get("password", ""),
         type="password",
+        key="taipei_password",
     )
 
 with col2:
@@ -77,11 +79,13 @@ with col2:
     accounts.ACCOUNTS["台中"]["email"] = st.text_input(
         "台中 Email",
         value=accounts.ACCOUNTS.get("台中", {}).get("email", ""),
+        key="taichung_email",
     )
     accounts.ACCOUNTS["台中"]["password"] = st.text_input(
         "台中 Password",
         value=accounts.ACCOUNTS.get("台中", {}).get("password", ""),
         type="password",
+        key="taichung_password",
     )
 
 
@@ -172,6 +176,7 @@ if run:
         m3.metric("失敗", result.get("failed", 0))
         m4.metric("略過", result.get("skipped", 0))
 
+        ui_log("執行完成")
         st.success("執行完成")
 
     except Exception as e:
