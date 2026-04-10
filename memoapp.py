@@ -1,193 +1,743 @@
-import streamlit as st
-import memo
+# -*- coding: utf-8 -*-
+import re
+import time
+from datetime import datetime
+from urllib.parse import urljoin
+from typing import Optional, List, Dict, Callable
+
+import gspread
+import requests
+from bs4 import BeautifulSoup
+from google.oauth2.service_account import Credentials
+
 import accounts
+import env
 
-st.set_page_config(
-    page_title="Memo System",
-    layout="wide",
-)
-
-st.title("📋 Memo 自動補備註系統")
-st.caption("搜尋手機號碼 + 已付款，依相同地址取得前次客服備註，回填並將服務狀態改為已處理")
+try:
+    import streamlit as st
+except Exception:
+    st = None
 
 
-# =========================
-# 初始化 session state
-# =========================
-if "live_logs" not in st.session_state:
-    st.session_state.live_logs = []
+# ========================
+# ENV
+# ========================
+ENV_NAME = getattr(env, "ENV", "prod").lower()
+BASE_URL_DEV = getattr(env, "BASE_URL_DEV", "https://backend-dev.lemonclean.com.tw")
+BASE_URL_PROD = getattr(env, "BASE_URL_PROD", "https://backend.lemonclean.com.tw")
 
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-
-
-# =========================
-# logger callback
-# =========================
-log_box = st.empty()
+BASE_URL = ""
+LOGIN_URL = ""
+PURCHASE_URL = ""
 
 
-def ui_logger(message: str):
-    st.session_state.live_logs.append(message)
-    log_box.code("\n".join(st.session_state.live_logs[-500:]))
+def set_env(env_name: str):
+    global ENV_NAME, BASE_URL, LOGIN_URL, PURCHASE_URL
+    ENV_NAME = env_name
+    BASE_URL = BASE_URL_DEV if env_name == "dev" else BASE_URL_PROD
+    BASE_URL = BASE_URL.rstrip("/")
+    LOGIN_URL = f"{BASE_URL}/login"
+    PURCHASE_URL = f"{BASE_URL}/purchase"
 
 
-# =========================
-# 環境選擇
-# =========================
-env_options = {
-    "正式機 prod": "prod",
-    "測試機 dev": "dev",
-}
+set_env(ENV_NAME)
 
-default_env_label = "測試機 dev" if memo.ENV_NAME == "dev" else "正式機 prod"
+# ========================
+# Google
+# ========================
+WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
+SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
+GOOGLE_SERVICE_ACCOUNT_FILE = getattr(env, "GOOGLE_SERVICE_ACCOUNT_FILE", "")
 
-with st.container(border=True):
-    st.subheader("1. 選擇環境")
+CURRENT_ROW_LOGS: List[str] = []
 
-    selected_env_label = st.radio(
-        "請選擇環境",
-        options=list(env_options.keys()),
-        index=list(env_options.keys()).index(default_env_label),
-        horizontal=True,
+
+def get_ws():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    if st is not None:
+        try:
+            creds = Credentials.from_service_account_info(
+                dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"]),
+                scopes=scopes,
+            )
+            gc = gspread.authorize(creds)
+            return gc.open_by_key(env.SHEET_ID).worksheet(WORKSHEET_NAME)
+        except Exception:
+            pass
+
+    creds = Credentials.from_service_account_file(
+        GOOGLE_SERVICE_ACCOUNT_FILE,
+        scopes=scopes,
     )
-
-    selected_env = env_options[selected_env_label]
-    memo.set_env(selected_env)
-
-    c1, c2 = st.columns(2)
-    c1.info(f"ENV：{memo.ENV_NAME}")
-    c2.info(f"BASE_URL：{memo.BASE_URL}")
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(env.SHEET_ID).worksheet(WORKSHEET_NAME)
 
 
-# =========================
-# 登入帳密
-# =========================
-with st.container(border=True):
-    st.subheader("2. 輸入登入帳密")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("#### 台北")
-        taipei_email = st.text_input(
-            "台北 email",
-            value=accounts.ACCOUNTS.get("台北", {}).get("email", ""),
-            key="taipei_email",
-        )
-        taipei_password = st.text_input(
-            "台北 password",
-            value=accounts.ACCOUNTS.get("台北", {}).get("password", ""),
-            type="password",
-            key="taipei_password",
-        )
-
-    with col2:
-        st.markdown("#### 台中")
-        taichung_email = st.text_input(
-            "台中 email",
-            value=accounts.ACCOUNTS.get("台中", {}).get("email", ""),
-            key="taichung_email",
-        )
-        taichung_password = st.text_input(
-            "台中 password",
-            value=accounts.ACCOUNTS.get("台中", {}).get("password", ""),
-            type="password",
-            key="taichung_password",
-        )
+# ========================
+# logger
+# ========================
+def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
+    def _log(msg: str):
+        print(msg, flush=True)
+        CURRENT_ROW_LOGS.append(msg)
+        if ui_logger:
+            ui_logger(msg)
+    return _log
 
 
-# =========================
-# 處理設定
-# =========================
-with st.container(border=True):
-    st.subheader("3. 處理設定")
+# ========================
+# 工具
+# ========================
+def normalize_phone(p):
+    return re.sub(r"\D+", "", str(p or ""))
 
-    row_spec = st.text_input(
-        "處理列",
-        value="2,3,5-8",
-        help="例如：2,3,5-8",
+
+def normalize_text(t):
+    return re.sub(r"\s+", "", str(t or ""))
+
+
+def parse_date(t):
+    if not t:
+        return None
+
+    s = str(t).strip()
+    for fmt in [
+        "%Y/%m/%d",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d %H:%M",
+    ]:
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+
+    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+        return datetime(y, mo, d)
+    return None
+
+
+def format_date(dt):
+    if not dt:
+        return ""
+    return dt.strftime("%Y/%m/%d")
+
+
+def parse_row_spec(spec):
+    rows = set()
+    for p in str(spec).split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if "-" in p:
+            a, b = map(int, p.split("-", 1))
+            if a > b:
+                a, b = b, a
+            rows.update(range(a, b + 1))
+        else:
+            rows.add(int(p))
+    return sorted(x for x in rows if x >= 2)
+
+
+def build_absolute_url(href: str) -> str:
+    return urljoin(BASE_URL + "/", str(href or "").strip())
+
+
+def safe_cell(row, idx_1_based):
+    i = idx_1_based - 1
+    return str(row[i]).strip() if i < len(row) else ""
+
+
+def same_address(a: str, b: str) -> bool:
+    na = normalize_text(a)
+    nb = normalize_text(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
+def match_region_by_address(address: str) -> Optional[str]:
+    addr = str(address or "")
+    for region, cfg in accounts.ACCOUNTS.items():
+        for kw in cfg.get("address_keywords", []):
+            if kw and kw in addr:
+                return region
+    return None
+
+
+def extract_address_from_text_block(text: str) -> str:
+    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
+    for i, line in enumerate(lines):
+        if any(k in line for k in ["市", "縣", "區", "鄉", "鎮", "路", "街", "段", "巷", "弄", "號"]):
+            if "付款" in line or "服務狀態" in line or "付款狀態" in line:
+                continue
+            addr = line
+            if i + 1 < len(lines):
+                next_line = lines[i + 1]
+                if any(k in next_line for k in ["樓", "室", "之", "A", "B", "C", "D"]):
+                    addr += next_line
+            return addr
+    return ""
+
+
+# ========================
+# 後台登入
+# ========================
+def login(region):
+    cfg = accounts.ACCOUNTS[region]
+    email = str(cfg.get("email", "")).strip()
+    password = str(cfg.get("password", "")).strip()
+
+    if not email or not password:
+        raise RuntimeError(f"{region} 缺少 email/password")
+
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    })
+
+    r = s.get(LOGIN_URL, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    token_el = soup.select_one("input[name=_token]")
+    if not token_el:
+        raise RuntimeError("登入頁找不到 _token")
+
+    token = token_el.get("value", "")
+
+    resp = s.post(
+        LOGIN_URL,
+        data={
+            "_token": token,
+            "email": email,
+            "password": password,
+        },
+        timeout=30,
+        allow_redirects=True,
     )
+    resp.raise_for_status()
 
-    force = st.checkbox("強制重跑", value=False)
+    check = s.get(PURCHASE_URL, timeout=30, allow_redirects=True)
+    check.raise_for_status()
 
-    run_btn = st.button("🚀 執行", type="primary")
+    if "/login" in check.url:
+        raise RuntimeError(f"{region} 登入失敗")
+
+    return s
 
 
-# =========================
-# 執行結果
-# =========================
-st.subheader("4. 執行結果")
+# ========================
+# 搜尋：手機 + 已付款
+# ========================
+def search_paid_orders_by_phone(session, phone) -> List[Dict]:
+    r = session.get(
+        PURCHASE_URL,
+        params={
+            "keyword": "",
+            "name": "",
+            "phone": phone,
+            "orderNo": "",
+            "date_s": "",
+            "date_e": "",
+            "clean_date_s": "",
+            "clean_date_e": "",
+            "paid_at_s": "",
+            "paid_at_e": "",
+            "refundDateS": "",
+            "refundDateE": "",
+            "buy": "",
+            "area_id": "",
+            "isCharge": "",
+            "isRefund": "",
+            "payway": "",
+            "purchase_status": "1",
+            "progress_status": "",
+            "invoiceStatus": "",
+            "otherFee": "",
+            "orderBy": "",
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
 
-metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    data = []
 
-last_result = st.session_state.last_result or {
-    "processed": 0,
-    "success": 0,
-    "failed": 0,
-    "skipped": 0,
-    "errors": [],
-}
+    rows = soup.select("table tbody tr")
+    if not rows:
+        rows = soup.select("tr")
 
-metric_col1.metric("執行筆數", last_result.get("processed", 0))
-metric_col2.metric("完成筆數", last_result.get("success", 0))
-metric_col3.metric("失敗筆數", last_result.get("failed", 0))
-metric_col4.metric("略過筆數", last_result.get("skipped", 0))
+    for tr in rows:
+        txt = tr.get_text("\n", strip=True)
 
-if st.session_state.live_logs:
-    log_box.code("\n".join(st.session_state.live_logs[-500:]))
+        m = re.search(r"(LC\d+)", txt)
+        if not m:
+            continue
 
-if run_btn:
-    st.session_state.live_logs = []
-    st.session_state.last_result = None
-    log_box.code("準備執行中...\n")
+        order_no = m.group(1)
 
-    if "台北" in accounts.ACCOUNTS:
-        accounts.ACCOUNTS["台北"]["email"] = taipei_email
-        accounts.ACCOUNTS["台北"]["password"] = taipei_password
+        date_str = ""
+        date_obj = None
+        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", txt)
+        if date_match:
+            date_str = date_match.group(1).replace("-", "/")
+            date_obj = parse_date(date_match.group(1))
 
-    if "台中" in accounts.ACCOUNTS:
-        accounts.ACCOUNTS["台中"]["email"] = taichung_email
-        accounts.ACCOUNTS["台中"]["password"] = taichung_password
+        status = ""
+        if "未處理" in txt:
+            status = "未處理"
+        elif "已處理" in txt:
+            status = "已處理"
+        elif "已完成" in txt:
+            status = "已完成"
 
-    try:
-        result = memo.main(
-            row_spec=row_spec,
-            force=force,
-            ui_logger=ui_logger,
-        )
+        address = extract_address_from_text_block(txt)
 
-        st.session_state.last_result = result
+        edit_link = tr.select_one('a[href*="/purchase/edit/"]')
+        edit_url = build_absolute_url(edit_link["href"]) if edit_link else ""
 
-        metric_col1.metric("執行筆數", result.get("processed", 0))
-        metric_col2.metric("完成筆數", result.get("success", 0))
-        metric_col3.metric("失敗筆數", result.get("failed", 0))
-        metric_col4.metric("略過筆數", result.get("skipped", 0))
+        data.append({
+            "order_no": order_no,
+            "date_str": date_str,
+            "date_obj": date_obj,
+            "status": status,
+            "address": address,
+            "edit_url": edit_url,
+        })
 
-        st.success("執行完成")
+    dedup = {}
+    for item in data:
+        dedup[item["order_no"]] = item
+    return list(dedup.values())
 
-    except Exception as e:
-        st.session_state.last_result = {
-            "processed": 0,
-            "success": 0,
-            "failed": 1,
-            "skipped": 0,
-            "errors": [str(e)],
+
+# ========================
+# 解析編輯頁（完整表單）
+# ========================
+def parse_edit_page(session, edit_url, phone=""):
+    params = {"phone": phone} if phone else None
+    r = session.get(edit_url, params=params, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    form = soup.select_one("form")
+    if not form:
+        raise RuntimeError(f"找不到表單: {edit_url}")
+
+    action = build_absolute_url(form.get("action") or edit_url)
+
+    fields = {}
+
+    for el in form.select("input, textarea, select"):
+        name = el.get("name")
+        if not name:
+            continue
+
+        tag = el.name.lower()
+
+        if tag == "textarea":
+            fields[name] = el.text or ""
+
+        elif tag == "select":
+            selected = el.select_one("option[selected]")
+            if selected is not None:
+                fields[name] = selected.get("value", "")
+            else:
+                first = el.select_one("option")
+                fields[name] = first.get("value", "") if first else ""
+
+        else:
+            input_type = (el.get("type") or "text").lower()
+
+            if input_type in ("checkbox", "radio"):
+                if el.has_attr("checked"):
+                    fields[name] = el.get("value", "on")
+            else:
+                fields[name] = el.get("value", "")
+
+    # 保底 token
+    if "_token" not in fields:
+        token_el = soup.select_one("input[name=_token]")
+        if token_el:
+            fields["_token"] = token_el.get("value", "")
+
+    notice = ""
+    notice_el = soup.select_one('textarea[name="notice"]')
+    if notice_el:
+        notice = notice_el.text.strip()
+    else:
+        notice = str(fields.get("notice", "")).strip()
+
+    page_text = soup.get_text("\n", strip=True)
+
+    order_no = ""
+    m = re.search(r"(LC\d+)", page_text)
+    if m:
+        order_no = m.group(1)
+
+    progress = str(fields.get("progress", "")).strip()
+
+    return {
+        "action": action,
+        "fields": fields,
+        "notice": notice,
+        "progress": progress,
+        "order_no": order_no,
+        "edit_url": edit_url,
+    }
+
+
+# ========================
+# 找前次 + 目標
+# ========================
+def find_previous_processed(current_order_no, current_address, current_phone, current_service_date, items):
+    matched = []
+    for x in items:
+        if x["order_no"] == current_order_no:
+            continue
+        if x["status"] not in ("已處理", "已完成"):
+            continue
+        if not x["date_obj"]:
+            continue
+        if current_service_date and x["date_obj"] >= current_service_date:
+            continue
+        if not same_address(x["address"], current_address):
+            continue
+        matched.append(x)
+
+    if not matched:
+        return None
+
+    matched.sort(key=lambda k: k["date_obj"], reverse=True)
+    return matched[0]
+
+
+def find_current_unprocessed_same_address(current_order_no, current_address, current_phone, items):
+    targets = []
+    for x in items:
+        if x["order_no"] != current_order_no:
+            continue
+        if x["status"] != "未處理":
+            continue
+        if not same_address(x["address"], current_address):
+            continue
+        targets.append(x)
+    return targets
+
+
+# ========================
+# 送出 / 驗證
+# ========================
+def submit_update(session, form_info, phone, new_notice):
+    action = form_info["action"]
+    fields = dict(form_info["fields"])
+
+    # 只覆蓋真正要改的欄位
+    fields["notice"] = new_notice
+    fields["progress"] = "1"
+
+    resp = session.post(
+        action,
+        params={"phone": phone} if phone else None,
+        data=fields,   # 關鍵：用 data，不用 files
+        headers={
+            "Referer": form_info["edit_url"],
+            "User-Agent": "Mozilla/5.0",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+def verify_update(session, edit_url, phone, expected_notice):
+    form = parse_edit_page(session, edit_url, phone)
+    actual_notice = str(form.get("notice", "")).strip()
+    actual_progress = str(form.get("progress", "")).strip()
+
+    notice_ok = actual_notice == str(expected_notice or "").strip()
+    progress_ok = actual_progress == "1"
+
+    return notice_ok and progress_ok, form
+
+
+# ========================
+# Sheet 樣式
+# ========================
+def apply_sheet_presentation(ws, updated_rows: List[int]):
+    if not updated_rows:
+        return
+
+    sheet_id = ws._properties["sheetId"]
+    requests_body = []
+
+    for row_num in updated_rows:
+        requests_body.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": row_num - 1,
+                    "endIndex": row_num,
+                },
+                "properties": {"pixelSize": 20},
+                "fields": "pixelSize"
+            }
+        })
+
+    requests_body.append({
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "startColumnIndex": 22,  # W
+                "endColumnIndex": 24,    # X 右邊界
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "wrapStrategy": "CLIP",
+                    "verticalAlignment": "MIDDLE"
+                }
+            },
+            "fields": "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"
         }
-        metric_col1.metric("執行筆數", 0)
-        metric_col2.metric("完成筆數", 0)
-        metric_col3.metric("失敗筆數", 1)
-        metric_col4.metric("略過筆數", 0)
-        st.error(f"執行失敗：{e}")
+    })
+
+    ws.spreadsheet.batch_update({"requests": requests_body})
 
 
-# =========================
-# 失敗明細
-# =========================
-final_result = st.session_state.last_result or {}
-errors = final_result.get("errors", [])
+# ========================
+# 主流程
+# ========================
+def main(row_spec="2", force=False, ui_logger=None):
+    ws = get_ws()
+    rows = ws.get_all_values()
 
-if errors:
-    st.markdown("#### 失敗明細")
-    for err in errors:
-        st.error(err)
+    row_nums = parse_row_spec(row_spec)
+    log = make_logger(ui_logger)
+
+    sessions = {}
+    updates = []
+    updated_row_numbers = []
+
+    result = {"processed": 0, "success": 0, "failed": 0, "skipped": 0, "errors": []}
+
+    for r in row_nums:
+        CURRENT_ROW_LOGS.clear()
+
+        try:
+            if r - 1 >= len(rows):
+                log(f"\n===== 第{r}列 =====")
+                log("❌ 超出資料範圍")
+                updates.append({
+                    "range": f"V{r}:X{r}",
+                    "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：超出資料範圍")
+                continue
+
+            row = rows[r - 1]
+
+            order = safe_cell(row, 2)       # B
+            date = safe_cell(row, 8)        # H
+            name = safe_cell(row, 13)       # M
+            addr = safe_cell(row, 14)       # N
+            phone = safe_cell(row, 15)      # O
+            v_status = safe_cell(row, 22)   # V
+
+            current_service_date = parse_date(date)
+
+            log(f"\n===== 第{r}列 =====")
+            log(f"訂單: {order}")
+            log(f"客戶: {name}")
+            log(f"電話: {phone}")
+            log(f"地址: {addr}")
+            log(f"日期: {date}")
+            log(f"V欄: {v_status}")
+
+            if v_status and not force:
+                log("⏭ 已有狀態，略過")
+                result["skipped"] += 1
+                continue
+
+            if not order or not addr or not phone:
+                log("❌ 缺少訂單 / 地址 / 電話")
+                updates.append({
+                    "range": f"V{r}:X{r}",
+                    "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：缺少訂單 / 地址 / 電話")
+                continue
+
+            region = match_region_by_address(addr)
+            if not region:
+                log("❌ 無法判斷區域")
+                updates.append({
+                    "range": f"V{r}:X{r}",
+                    "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：無法判斷區域")
+                continue
+
+            if region not in sessions:
+                log(f"[登入] {region}")
+                sessions[region] = login(region)
+
+            s = sessions[region]
+
+            items = search_paid_orders_by_phone(s, phone)
+
+            log("\n[列表頁候選]")
+            for i in items:
+                log(f"{i['order_no']} {i['date_str']} {i['status']} {i['address']}")
+
+            prev = find_previous_processed(order, addr, phone, current_service_date, items)
+            if not prev:
+                log("❌ 沒有上一筆")
+                updates.append({
+                    "range": f"V{r}:X{r}",
+                    "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：沒有上一筆")
+                continue
+
+            targets = find_current_unprocessed_same_address(order, addr, phone, items)
+            if not targets:
+                log("❌ 沒有未處理目標單")
+                updates.append({
+                    "range": f"V{r}:X{r}",
+                    "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：沒有未處理目標單")
+                continue
+
+            log(f"\n[上一筆] {prev['order_no']} {prev['date_str']} {prev['status']} {prev['address']}")
+
+            prev_form = parse_edit_page(s, prev["edit_url"], phone)
+            prev_notice = str(prev_form.get("notice", "")).strip()
+
+            if not prev_notice:
+                log("❌ 上一筆找不到客服備註")
+                updates.append({
+                    "range": f"S{r}:X{r}",
+                    "values": [[
+                        prev["date_str"],
+                        prev["order_no"],
+                        "",
+                        "失敗",
+                        "\n".join(CURRENT_ROW_LOGS),
+                        ""
+                    ]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：上一筆找不到客服備註")
+                continue
+
+            submit_ok = 0
+            verify_ok = 0
+            failed_targets = []
+
+            for t in targets:
+                log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['status']} {t['address']}")
+                target_form = parse_edit_page(s, t["edit_url"], phone)
+
+                try:
+                    submit_update(s, target_form, phone, prev_notice)
+                    time.sleep(SLEEP_SECONDS)
+                    submit_ok += 1
+
+                    ok, verified_form = verify_update(s, t["edit_url"], phone, prev_notice)
+                    time.sleep(SLEEP_SECONDS)
+
+                    if ok:
+                        verify_ok += 1
+                        log(f"✅ 驗證成功 {t['order_no']}")
+                    else:
+                        failed_targets.append(t["order_no"])
+                        log(
+                            f"❌ 驗證失敗 {t['order_no']} "
+                            f"(progress={verified_form.get('progress','')}, "
+                            f"notice_head={str(verified_form.get('notice',''))[:30]})"
+                        )
+                except Exception as e:
+                    failed_targets.append(t["order_no"])
+                    log(f"❌ 寫入失敗 {t['order_no']}：{e}")
+
+            if verify_ok == len(targets):
+                log(f"✅ 成功：已回填 {verify_ok} 筆")
+
+                updates.append({
+                    "range": f"S{r}:X{r}",
+                    "values": [[
+                        prev["date_str"],
+                        prev["order_no"],
+                        prev_notice,
+                        "成功",
+                        "\n".join(CURRENT_ROW_LOGS),
+                        prev_notice
+                    ]],
+                })
+                updated_row_numbers.append(r)
+                result["success"] += 1
+                result["processed"] += 1
+            else:
+                log(
+                    f"❌ 失敗：已送出 {submit_ok} 筆，驗證成功 {verify_ok} 筆，"
+                    f"失敗目標：{', '.join(failed_targets)}"
+                )
+
+                updates.append({
+                    "range": f"S{r}:X{r}",
+                    "values": [[
+                        prev["date_str"],
+                        prev["order_no"],
+                        prev_notice,
+                        "失敗",
+                        "\n".join(CURRENT_ROW_LOGS),
+                        prev_notice
+                    ]],
+                })
+                updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["processed"] += 1
+                result["errors"].append(
+                    f"第{r}列：已送出 {submit_ok} 筆，驗證成功 {verify_ok} 筆，失敗目標：{', '.join(failed_targets)}"
+                )
+
+        except Exception as e:
+            log(f"❌ 例外錯誤：{e}")
+            updates.append({
+                "range": f"V{r}:X{r}",
+                "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
+            })
+            updated_row_numbers.append(r)
+            result["failed"] += 1
+            result["errors"].append(f"第{r}列：{e}")
+
+    if updates:
+        ws.batch_update(updates, value_input_option="RAW")
+        apply_sheet_presentation(ws, updated_row_numbers)
+
+    return result
