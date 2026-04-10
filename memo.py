@@ -2,7 +2,7 @@
 import re
 import time
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs
 from typing import Optional, List, Dict, Callable
 
 import gspread
@@ -125,12 +125,6 @@ def parse_date(t):
     return None
 
 
-def format_date(dt):
-    if not dt:
-        return ""
-    return dt.strftime("%Y/%m/%d")
-
-
 def parse_row_spec(spec):
     rows = set()
     for p in str(spec).split(","):
@@ -186,6 +180,16 @@ def extract_address_from_text_block(text: str) -> str:
                     addr += next_line
             return addr
     return ""
+
+
+def parse_query_params_from_url(url: str) -> Dict[str, str]:
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    result = {}
+    for k, v in qs.items():
+        if v:
+            result[k] = v[0]
+    return result
 
 
 # ========================
@@ -272,7 +276,6 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
     soup = BeautifulSoup(r.text, "html.parser")
 
     data = []
-
     rows = soup.select("table tbody tr")
     if not rows:
         rows = soup.select("tr")
@@ -325,7 +328,10 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
 # 解析編輯頁（完整表單）
 # ========================
 def parse_edit_page(session, edit_url, phone=""):
-    params = {"phone": phone} if phone else None
+    params = {}
+    if phone:
+        params["phone"] = phone
+
     r = session.get(edit_url, params=params, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -335,6 +341,7 @@ def parse_edit_page(session, edit_url, phone=""):
         raise RuntimeError(f"找不到表單: {edit_url}")
 
     action = build_absolute_url(form.get("action") or edit_url)
+    current_query_params = parse_query_params_from_url(r.url)
 
     fields = {}
 
@@ -365,7 +372,6 @@ def parse_edit_page(session, edit_url, phone=""):
             else:
                 fields[name] = el.get("value", "")
 
-    # 保底 token
     if "_token" not in fields:
         token_el = soup.select_one("input[name=_token]")
         if token_el:
@@ -393,7 +399,8 @@ def parse_edit_page(session, edit_url, phone=""):
         "notice": notice,
         "progress": progress,
         "order_no": order_no,
-        "edit_url": edit_url,
+        "edit_url": r.url,
+        "query_params": current_query_params,
     }
 
 
@@ -441,15 +448,18 @@ def find_current_unprocessed_same_address(current_order_no, current_address, cur
 def submit_update(session, form_info, phone, new_notice):
     action = form_info["action"]
     fields = dict(form_info["fields"])
+    query_params = dict(form_info.get("query_params", {}))
 
-    # 只覆蓋真正要改的欄位
     fields["notice"] = new_notice
     fields["progress"] = "1"
 
+    if phone and "phone" not in query_params:
+        query_params["phone"] = phone
+
     resp = session.post(
         action,
-        params={"phone": phone} if phone else None,
-        data=fields,   # 關鍵：用 data，不用 files
+        params=query_params,
+        files={k: (None, str(v)) for k, v in fields.items()},
         headers={
             "Referer": form_info["edit_url"],
             "User-Agent": "Mozilla/5.0",
