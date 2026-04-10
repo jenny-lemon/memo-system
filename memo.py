@@ -3,16 +3,20 @@ import re
 import time
 from datetime import datetime
 from urllib.parse import urljoin
-from typing import Optional, List, Dict, Set, Callable
+from typing import Optional, List, Dict, Callable
 
+import gspread
 import requests
 from bs4 import BeautifulSoup
-import gspread
 from google.oauth2.service_account import Credentials
-import streamlit as st
 
 import accounts
 import env
+
+try:
+    import streamlit as st
+except Exception:
+    st = None
 
 
 # ========================
@@ -43,6 +47,8 @@ set_env(ENV_NAME)
 # ========================
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
+GOOGLE_SERVICE_ACCOUNT_FILE = getattr(env, "GOOGLE_SERVICE_ACCOUNT_FILE", "")
+
 CURRENT_ROW_LOGS: List[str] = []
 
 
@@ -52,17 +58,21 @@ def get_ws():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    try:
-        creds = Credentials.from_service_account_info(
-            dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"]),
-            scopes=scopes,
-        )
-    except Exception:
-        creds = Credentials.from_service_account_file(
-            "service_account.json",
-            scopes=scopes,
-        )
+    if st is not None:
+        try:
+            creds = Credentials.from_service_account_info(
+                dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"]),
+                scopes=scopes,
+            )
+            gc = gspread.authorize(creds)
+            return gc.open_by_key(env.SHEET_ID).worksheet(WORKSHEET_NAME)
+        except Exception:
+            pass
 
+    creds = Credentials.from_service_account_file(
+        GOOGLE_SERVICE_ACCOUNT_FILE,
+        scopes=scopes,
+    )
     gc = gspread.authorize(creds)
     return gc.open_by_key(env.SHEET_ID).worksheet(WORKSHEET_NAME)
 
@@ -93,6 +103,7 @@ def normalize_text(t):
 def parse_date(t):
     if not t:
         return None
+
     s = str(t).strip()
     for fmt in [
         "%Y/%m/%d",
@@ -112,6 +123,12 @@ def parse_date(t):
         y, mo, d = map(int, m.groups())
         return datetime(y, mo, d)
     return None
+
+
+def format_date(dt):
+    if not dt:
+        return ""
+    return dt.strftime("%Y/%m/%d")
 
 
 def parse_row_spec(spec):
@@ -139,6 +156,14 @@ def safe_cell(row, idx_1_based):
     return str(row[i]).strip() if i < len(row) else ""
 
 
+def same_address(a: str, b: str) -> bool:
+    na = normalize_text(a)
+    nb = normalize_text(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
 def match_region_by_address(address: str) -> Optional[str]:
     addr = str(address or "")
     for region, cfg in accounts.ACCOUNTS.items():
@@ -146,6 +171,21 @@ def match_region_by_address(address: str) -> Optional[str]:
             if kw and kw in addr:
                 return region
     return None
+
+
+def extract_address_from_text_block(text: str) -> str:
+    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
+    for i, line in enumerate(lines):
+        if any(k in line for k in ["市", "縣", "區", "鄉", "鎮", "路", "街", "段", "巷", "弄", "號"]):
+            if "付款" in line or "服務狀態" in line or "付款狀態" in line:
+                continue
+            addr = line
+            if i + 1 < len(lines):
+                next_line = lines[i + 1]
+                if any(k in next_line for k in ["樓", "室", "之", "A", "B", "C", "D"]):
+                    addr += next_line
+            return addr
+    return ""
 
 
 # ========================
@@ -197,9 +237,9 @@ def login(region):
 
 
 # ========================
-# 列表搜尋：手機 + 已付款
+# 搜尋：手機 + 已付款
 # ========================
-def search_paid_orders_by_phone(session, phone):
+def search_paid_orders_by_phone(session, phone) -> List[Dict]:
     r = session.get(
         PURCHASE_URL,
         params={
@@ -220,7 +260,7 @@ def search_paid_orders_by_phone(session, phone):
             "isCharge": "",
             "isRefund": "",
             "payway": "",
-            "purchase_status": "1",  # 已付款
+            "purchase_status": "1",   # 已付款
             "progress_status": "",
             "invoiceStatus": "",
             "otherFee": "",
@@ -233,7 +273,11 @@ def search_paid_orders_by_phone(session, phone):
 
     data = []
 
-    for tr in soup.select("tr"):
+    rows = soup.select("table tbody tr")
+    if not rows:
+        rows = soup.select("tr")
+
+    for tr in rows:
         txt = tr.get_text("\n", strip=True)
 
         m = re.search(r"(LC\d+)", txt)
@@ -242,9 +286,11 @@ def search_paid_orders_by_phone(session, phone):
 
         order_no = m.group(1)
 
+        date_str = ""
         date_obj = None
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", txt)
         if date_match:
+            date_str = date_match.group(1).replace("-", "/")
             date_obj = parse_date(date_match.group(1))
 
         status = ""
@@ -255,20 +301,14 @@ def search_paid_orders_by_phone(session, phone):
         elif "已完成" in txt:
             status = "已完成"
 
-        address = ""
-        for line in txt.splitlines():
-            s = line.strip()
-            if any(k in s for k in ["市", "區", "路", "街", "段", "巷", "弄", "號"]):
-                if len(s) >= 6 and "付款" not in s and "服務" not in s:
-                    address = s
-                    break
+        address = extract_address_from_text_block(txt)
 
         edit_link = tr.select_one('a[href*="/purchase/edit/"]')
         edit_url = build_absolute_url(edit_link["href"]) if edit_link else ""
 
         data.append({
             "order_no": order_no,
-            "date_str": date_match.group(1).replace("-", "/") if date_match else "",
+            "date_str": date_str,
             "date_obj": date_obj,
             "status": status,
             "address": address,
@@ -304,6 +344,7 @@ def parse_edit_page(session, edit_url, phone=""):
 
         if tag == "textarea":
             fields[name] = el.text or ""
+
         elif tag == "select":
             selected = el.select_one("option[selected]")
             if selected is not None:
@@ -311,6 +352,7 @@ def parse_edit_page(session, edit_url, phone=""):
             else:
                 first = el.select_one("option")
                 fields[name] = first.get("value", "") if first else ""
+
         else:
             input_type = (el.get("type") or "text").lower()
             if input_type in ("checkbox", "radio"):
@@ -320,15 +362,16 @@ def parse_edit_page(session, edit_url, phone=""):
                 fields[name] = el.get("value", "")
 
     notice = ""
-    notice_el = soup.select_one("textarea[name=notice]")
+    notice_el = soup.select_one('textarea[name="notice"]')
     if notice_el:
         notice = notice_el.text.strip()
     elif "notice" in fields:
         notice = str(fields.get("notice", "")).strip()
 
+    page_text = soup.get_text("\n", strip=True)
+
     order_no = ""
-    text_all = soup.get_text("\n", strip=True)
-    m = re.search(r"(LC\d+)", text_all)
+    m = re.search(r"(LC\d+)", page_text)
     if m:
         order_no = m.group(1)
 
@@ -346,12 +389,9 @@ def parse_edit_page(session, edit_url, phone=""):
 
 
 # ========================
-# 找前次訂單
+# 找前次 + 目標
 # ========================
 def find_previous_processed(current_order_no, current_address, current_phone, current_service_date, items):
-    addr_now = normalize_text(current_address)
-    phone_now = normalize_phone(current_phone)
-
     matched = []
     for x in items:
         if x["order_no"] == current_order_no:
@@ -387,7 +427,7 @@ def find_current_unprocessed_same_address(current_order_no, current_address, cur
 
 
 # ========================
-# 送出回寫
+# 送出 / 驗證
 # ========================
 def submit_update(session, form_info, phone, new_notice):
     action = form_info["action"]
@@ -419,17 +459,15 @@ def verify_update(session, edit_url, phone, expected_notice):
 
 
 # ========================
-# Sheet 呈現：W/X 不撐高
+# Sheet 樣式
 # ========================
 def apply_sheet_presentation(ws, updated_rows: List[int]):
     if not updated_rows:
         return
 
     sheet_id = ws._properties["sheetId"]
-
     requests_body = []
 
-    # 設列高 20
     for row_num in updated_rows:
         requests_body.append({
             "updateDimensionProperties": {
@@ -439,22 +477,19 @@ def apply_sheet_presentation(ws, updated_rows: List[int]):
                     "startIndex": row_num - 1,
                     "endIndex": row_num,
                 },
-                "properties": {
-                    "pixelSize": 20
-                },
+                "properties": {"pixelSize": 20},
                 "fields": "pixelSize"
             }
         })
 
-    # W:X 文字裁切
-    # W=23, X=24 -> 0-based start 22, end 24
+    # W:X 使用裁切，不撐高
     requests_body.append({
         "repeatCell": {
             "range": {
                 "sheetId": sheet_id,
                 "startRowIndex": 1,
-                "startColumnIndex": 22,
-                "endColumnIndex": 24,
+                "startColumnIndex": 22,  # W
+                "endColumnIndex": 24,    # X 右邊界
             },
             "cell": {
                 "userEnteredFormat": {
@@ -492,13 +527,13 @@ def main(row_spec="2", force=False, ui_logger=None):
             if r - 1 >= len(rows):
                 log(f"\n===== 第{r}列 =====")
                 log("❌ 超出資料範圍")
-                result["failed"] += 1
-                result["errors"].append(f"第{r}列：超出資料範圍")
                 updates.append({
                     "range": f"V{r}:X{r}",
                     "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
                 })
                 updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：超出資料範圍")
                 continue
 
             row = rows[r - 1]
@@ -527,25 +562,25 @@ def main(row_spec="2", force=False, ui_logger=None):
 
             if not order or not addr or not phone:
                 log("❌ 缺少訂單 / 地址 / 電話")
-                result["failed"] += 1
-                result["errors"].append(f"第{r}列：缺少訂單 / 地址 / 電話")
                 updates.append({
                     "range": f"V{r}:X{r}",
                     "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
                 })
                 updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：缺少訂單 / 地址 / 電話")
                 continue
 
             region = match_region_by_address(addr)
             if not region:
                 log("❌ 無法判斷區域")
-                result["failed"] += 1
-                result["errors"].append(f"第{r}列：無法判斷區域")
                 updates.append({
                     "range": f"V{r}:X{r}",
                     "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
                 })
                 updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：無法判斷區域")
                 continue
 
             if region not in sessions:
@@ -563,25 +598,25 @@ def main(row_spec="2", force=False, ui_logger=None):
             prev = find_previous_processed(order, addr, phone, current_service_date, items)
             if not prev:
                 log("❌ 沒有上一筆")
-                result["failed"] += 1
-                result["errors"].append(f"第{r}列：沒有上一筆")
                 updates.append({
                     "range": f"V{r}:X{r}",
                     "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
                 })
                 updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：沒有上一筆")
                 continue
 
             targets = find_current_unprocessed_same_address(order, addr, phone, items)
             if not targets:
                 log("❌ 沒有未處理目標單")
-                result["failed"] += 1
-                result["errors"].append(f"第{r}列：沒有未處理目標單")
                 updates.append({
                     "range": f"V{r}:X{r}",
                     "values": [["失敗", "\n".join(CURRENT_ROW_LOGS), ""]],
                 })
                 updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：沒有未處理目標單")
                 continue
 
             log(f"\n[上一筆] {prev['order_no']} {prev['date_str']} {prev['status']} {prev['address']}")
@@ -591,8 +626,6 @@ def main(row_spec="2", force=False, ui_logger=None):
 
             if not prev_notice:
                 log("❌ 上一筆找不到客服備註")
-                result["failed"] += 1
-                result["errors"].append(f"第{r}列：上一筆找不到客服備註")
                 updates.append({
                     "range": f"S{r}:X{r}",
                     "values": [[
@@ -605,6 +638,8 @@ def main(row_spec="2", force=False, ui_logger=None):
                     ]],
                 })
                 updated_row_numbers.append(r)
+                result["failed"] += 1
+                result["errors"].append(f"第{r}列：上一筆找不到客服備註")
                 continue
 
             submit_ok = 0
@@ -637,7 +672,6 @@ def main(row_spec="2", force=False, ui_logger=None):
                     failed_targets.append(t["order_no"])
                     log(f"❌ 寫入失敗 {t['order_no']}：{e}")
 
-            # 只有全部 target 驗證成功，才算成功
             if verify_ok == len(targets):
                 log(f"✅ 成功：已回填 {verify_ok} 筆")
 
@@ -660,6 +694,7 @@ def main(row_spec="2", force=False, ui_logger=None):
                     f"❌ 失敗：已送出 {submit_ok} 筆，驗證成功 {verify_ok} 筆，"
                     f"失敗目標：{', '.join(failed_targets)}"
                 )
+
                 updates.append({
                     "range": f"S{r}:X{r}",
                     "values": [[
