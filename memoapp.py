@@ -14,26 +14,13 @@ if "logs" not in st.session_state:
     st.session_state.logs = []
 
 if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-
-
-# ========================
-# logger
-# ========================
-log_box = st.empty()
-
-
-def render_logs():
-    if st.session_state.logs:
-        log_box.code("\n".join(st.session_state.logs[-3000:]))
-    else:
-        log_box.code("尚未執行")
-
-
-def ui_log(msg):
-    st.session_state.logs.append(msg)
-    render_logs()
-
+    st.session_state.last_result = {
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "errors": [],
+    }
 
 # ========================
 # 環境
@@ -44,12 +31,11 @@ env_option = st.radio(
     "環境",
     ["prod", "dev"],
     horizontal=True,
-    index=0
+    index=0,
 )
 
 memo.set_env(env_option)
 st.caption(f"目前環境：{env_option}")
-
 
 # ========================
 # 帳密
@@ -74,7 +60,12 @@ with col1:
 
 with col2:
     if "台中" not in accounts.ACCOUNTS:
-        accounts.ACCOUNTS["台中"] = {"email": "", "password": "", "address_keywords": ["台中"]}
+        accounts.ACCOUNTS["台中"] = {
+            "email": "",
+            "password": "",
+            "address_keywords": ["台中"],
+        }
+
     st.markdown("#### 台中")
     accounts.ACCOUNTS["台中"]["email"] = st.text_input(
         "台中 Email",
@@ -87,7 +78,6 @@ with col2:
         type="password",
         key="taichung_password",
     )
-
 
 # ========================
 # 模式
@@ -118,36 +108,61 @@ elif mode == "直接輸入電話號碼模式":
     phone = st.text_input("電話號碼", "")
 
 elif mode == "搜尋條件模式":
-    col_a, col_b = st.columns(2)
-    with col_a:
+    c1, c2 = st.columns(2)
+    with c1:
         date_s = st.text_input("訂購日期 YYYY/MM/DD", "2026/04/09")
-    with col_b:
+    with c2:
         limit = st.number_input("每次處理筆數", min_value=1, max_value=100, value=5)
 
     st.caption("條件：付款狀態 = 已付款，服務狀態 = 未處理")
 
-
-# ========================
-# 執行
-# ========================
 run = st.button("🚀 執行", use_container_width=True)
 
+# ========================
+# 執行過程
+# ========================
 st.subheader("4. 執行過程")
+
+log_placeholder = st.empty()
+
+def render_logs():
+    if st.session_state.logs:
+        log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
+    else:
+        log_placeholder.code("尚未執行")
+
+def ui_log(msg: str):
+    st.session_state.logs.append(str(msg))
+    log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
+
 render_logs()
 
+# ========================
+# 執行結果
+# ========================
 st.subheader("5. 執行結果")
 
 m1, m2, m3, m4 = st.columns(4)
-last = st.session_state.last_result or {"processed": 0, "success": 0, "failed": 0, "skipped": 0, "errors": []}
+last = st.session_state.last_result
 
 m1.metric("執行筆數", last.get("processed", 0))
 m2.metric("成功", last.get("success", 0))
 m3.metric("失敗", last.get("failed", 0))
 m4.metric("略過", last.get("skipped", 0))
 
+# ========================
+# 執行
+# ========================
 if run:
     st.session_state.logs = []
-    st.session_state.last_result = None
+    st.session_state.last_result = {
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
     ui_log("準備執行中...")
 
     try:
@@ -180,9 +195,26 @@ if run:
         st.success("執行完成")
 
     except Exception as e:
-        ui_log(f"執行失敗：{e}")
-        st.error(f"執行失敗：{e}")
+        err = f"執行失敗：{e}"
+        ui_log(err)
+        st.session_state.last_result = {
+            "processed": 0,
+            "success": 0,
+            "failed": 1,
+            "skipped": 0,
+            "errors": [str(e)],
+        }
 
+        m1.metric("執行筆數", 0)
+        m2.metric("成功", 0)
+        m3.metric("失敗", 1)
+        m4.metric("略過", 0)
+
+        st.error(err)
+
+# ========================
+# 失敗明細
+# ========================
 final_result = st.session_state.last_result or {}
 errors = final_result.get("errors", [])
 
