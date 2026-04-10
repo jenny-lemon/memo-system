@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import memo
-import accounts
 
 st.set_page_config(page_title="Memo 自動回填系統", layout="wide")
 
 st.title("📋 Memo 自動回填系統")
 
 # ========================
-# session state
+# Session state
 # ========================
 if "logs" not in st.session_state:
     st.session_state.logs = []
@@ -19,6 +18,7 @@ if "last_result" not in st.session_state:
         "success": 0,
         "failed": 0,
         "skipped": 0,
+        "updated_orders": 0,
         "errors": [],
     }
 
@@ -30,12 +30,13 @@ def reset_run_state():
         "success": 0,
         "failed": 0,
         "skipped": 0,
+        "updated_orders": 0,
         "errors": [],
     }
 
 
 # ========================
-# 環境
+# Environment
 # ========================
 st.subheader("1. 選擇環境")
 
@@ -50,48 +51,17 @@ memo.set_env(env_option)
 st.caption(f"目前環境：{env_option}")
 
 # ========================
-# 帳密
+# Login credentials
 # ========================
-st.subheader("2. 帳號設定")
+st.subheader("2. 登入帳密")
 
-col1, col2 = st.columns(2)
+email = st.text_input("Email", value="", key="login_email")
+password = st.text_input("Password", value="", type="password", key="login_password")
 
-with col1:
-    st.markdown("#### 台北")
-    accounts.ACCOUNTS["台北"]["email"] = st.text_input(
-        "台北 Email",
-        value=accounts.ACCOUNTS.get("台北", {}).get("email", ""),
-        key="taipei_email",
-    )
-    accounts.ACCOUNTS["台北"]["password"] = st.text_input(
-        "台北 Password",
-        value=accounts.ACCOUNTS.get("台北", {}).get("password", ""),
-        type="password",
-        key="taipei_password",
-    )
-
-with col2:
-    if "台中" not in accounts.ACCOUNTS:
-        accounts.ACCOUNTS["台中"] = {
-            "email": "",
-            "password": "",
-            "address_keywords": ["台中"],
-        }
-    st.markdown("#### 台中")
-    accounts.ACCOUNTS["台中"]["email"] = st.text_input(
-        "台中 Email",
-        value=accounts.ACCOUNTS.get("台中", {}).get("email", ""),
-        key="taichung_email",
-    )
-    accounts.ACCOUNTS["台中"]["password"] = st.text_input(
-        "台中 Password",
-        value=accounts.ACCOUNTS.get("台中", {}).get("password", ""),
-        type="password",
-        key="taichung_password",
-    )
+memo.set_runtime_credentials(email, password)
 
 # ========================
-# 模式
+# Mode
 # ========================
 st.subheader("3. 選擇模式")
 
@@ -102,13 +72,6 @@ mode = st.radio(
         "直接輸入電話號碼模式",
         "搜尋條件模式",
     ],
-    horizontal=True,
-)
-
-# 單選地區
-region = st.radio(
-    "地區",
-    ["台北", "台中"],
     horizontal=True,
 )
 
@@ -137,7 +100,7 @@ elif mode == "搜尋條件模式":
 run = st.button("🚀 執行", use_container_width=True)
 
 # ========================
-# 執行過程
+# Execution logs
 # ========================
 st.subheader("4. 執行過程")
 log_placeholder = st.empty()
@@ -158,7 +121,7 @@ def ui_log(msg: str):
 render_logs()
 
 # ========================
-# 執行結果
+# Result
 # ========================
 st.subheader("5. 執行結果")
 metrics_placeholder = st.empty()
@@ -167,12 +130,14 @@ errors_placeholder = st.empty()
 
 def render_result():
     last = st.session_state.last_result
+
     with metrics_placeholder.container():
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("執行筆數", last.get("processed", 0))
         m2.metric("成功", last.get("success", 0))
         m3.metric("失敗", last.get("failed", 0))
         m4.metric("略過", last.get("skipped", 0))
+        m5.metric("回寫筆數", last.get("updated_orders", 0))
 
     with errors_placeholder.container():
         errors = last.get("errors", [])
@@ -185,7 +150,7 @@ def render_result():
 render_result()
 
 # ========================
-# 執行
+# Run
 # ========================
 if run:
     reset_run_state()
@@ -194,41 +159,54 @@ if run:
 
     ui_log("準備執行中...")
 
-    try:
-        if mode == "Google Sheet列號模式":
-            result = memo.main(
-                row_spec=row_spec,
-                force=force,
-                ui_logger=ui_log,
-            )
-        elif mode == "直接輸入電話號碼模式":
-            result = memo.main_by_phone(
-                phone=phone,
-                region=region,
-                ui_logger=ui_log,
-            )
-        else:
-            result = memo.main_by_conditions(
-                date_s=date_s,
-                limit=int(limit),
-                region=region,
-                ui_logger=ui_log,
-            )
-
-        st.session_state.last_result = result
-        render_result()
-        ui_log("執行完成")
-        st.success("執行完成")
-
-    except Exception as e:
-        err = f"執行失敗：{e}"
+    if not email or not password:
+        err = "請先輸入 Email / Password"
         ui_log(err)
         st.session_state.last_result = {
             "processed": 0,
             "success": 0,
             "failed": 1,
             "skipped": 0,
-            "errors": [str(e)],
+            "updated_orders": 0,
+            "errors": [err],
         }
         render_result()
         st.error(err)
+    else:
+        try:
+            if mode == "Google Sheet列號模式":
+                result = memo.main(
+                    row_spec=row_spec,
+                    force=force,
+                    ui_logger=ui_log,
+                )
+            elif mode == "直接輸入電話號碼模式":
+                result = memo.main_by_phone(
+                    phone=phone,
+                    ui_logger=ui_log,
+                )
+            else:
+                result = memo.main_by_conditions(
+                    date_s=date_s,
+                    limit=int(limit),
+                    ui_logger=ui_log,
+                )
+
+            st.session_state.last_result = result
+            render_result()
+            ui_log("執行完成")
+            st.success("執行完成")
+
+        except Exception as e:
+            err = f"執行失敗：{e}"
+            ui_log(err)
+            st.session_state.last_result = {
+                "processed": 0,
+                "success": 0,
+                "failed": 1,
+                "skipped": 0,
+                "updated_orders": 0,
+                "errors": [str(e)],
+            }
+            render_result()
+            st.error(err)
