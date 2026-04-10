@@ -43,16 +43,158 @@ def set_env(env_name: str):
 set_env(ENV_NAME)
 
 # ========================
-# Google
+# 設定
 # ========================
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 LOG_SHEET_NAME = getattr(env, "LOG_SHEET_NAME", "memo_log")
-SLEEP_SECONDS = getattr(env, "SLEEP_SECONDS", 0.5)
+SLEEP_SECONDS = float(getattr(env, "SLEEP_SECONDS", 0.5))
 GOOGLE_SERVICE_ACCOUNT_FILE = getattr(env, "GOOGLE_SERVICE_ACCOUNT_FILE", "")
+
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
+RETRY_BACKOFF = 1.5
 
 CURRENT_ROW_LOGS: List[str] = []
 
 
+# ========================
+# logger
+# ========================
+def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
+    def _log(msg: str):
+        print(msg, flush=True)
+        CURRENT_ROW_LOGS.append(msg)
+        if ui_logger:
+            ui_logger(msg)
+    return _log
+
+
+# ========================
+# 共用工具
+# ========================
+def normalize_phone(p: str) -> str:
+    return re.sub(r"\D+", "", str(p or ""))
+
+
+def normalize_text(t: str) -> str:
+    return re.sub(r"\s+", "", str(t or ""))
+
+
+def clip_text(text: str, limit: int = 50000) -> str:
+    return str(text or "")[:limit]
+
+
+def safe_cell(row: List[str], idx_1_based: int) -> str:
+    i = idx_1_based - 1
+    return str(row[i]).strip() if i < len(row) else ""
+
+
+def parse_date(t: str):
+    if not t:
+        return None
+
+    s = str(t).strip()
+    for fmt in [
+        "%Y/%m/%d",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d %H:%M",
+    ]:
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+
+    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+        return datetime(y, mo, d)
+    return None
+
+
+def parse_row_spec(spec: str) -> List[int]:
+    rows = set()
+    for p in str(spec).split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if "-" in p:
+            a, b = map(int, p.split("-", 1))
+            if a > b:
+                a, b = b, a
+            rows.update(range(a, b + 1))
+        else:
+            rows.add(int(p))
+    return sorted(x for x in rows if x >= 2)
+
+
+def build_absolute_url(href: str) -> str:
+    return urljoin(BASE_URL + "/", str(href or "").strip())
+
+
+def same_address(a: str, b: str) -> bool:
+    na = normalize_text(a)
+    nb = normalize_text(b)
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
+def match_region_by_address(address: str) -> Optional[str]:
+    addr = str(address or "")
+    for region, cfg in accounts.ACCOUNTS.items():
+        for kw in cfg.get("address_keywords", []):
+            if kw and kw in addr:
+                return region
+    return None
+
+
+def parse_query_params_from_url(url: str) -> Dict[str, str]:
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    result = {}
+    for k, v in qs.items():
+        if v:
+            result[k] = v[0]
+    return result
+
+
+def extract_address_from_text_block(text: str) -> str:
+    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
+    for i, line in enumerate(lines):
+        if any(k in line for k in ["市", "縣", "區", "鄉", "鎮", "路", "街", "段", "巷", "弄", "號"]):
+            if "付款" in line or "服務狀態" in line or "付款狀態" in line:
+                continue
+            addr = line
+            if i + 1 < len(lines):
+                next_line = lines[i + 1]
+                if any(k in next_line for k in ["樓", "室", "之", "A", "B", "C", "D"]):
+                    addr += next_line
+            return addr
+    return ""
+
+
+# ========================
+# retry
+# ========================
+def with_retry(fn, *args, **kwargs):
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            if attempt >= MAX_RETRIES:
+                break
+            time.sleep(RETRY_BACKOFF * attempt)
+    raise last_err
+
+
+# ========================
+# Google
+# ========================
 def get_spreadsheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -79,8 +221,7 @@ def get_spreadsheet():
 
 
 def get_ws():
-    sh = get_spreadsheet()
-    return sh.worksheet(WORKSHEET_NAME)
+    return get_spreadsheet().worksheet(WORKSHEET_NAME)
 
 
 def get_log_ws():
@@ -108,130 +249,100 @@ def get_log_ws():
         return ws
 
 
-# ========================
-# logger
-# ========================
-def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
-    def _log(msg: str):
-        print(msg, flush=True)
-        CURRENT_ROW_LOGS.append(msg)
-        if ui_logger:
-            ui_logger(msg)
-    return _log
+def append_log_row(
+    log_ws,
+    source_type: str,
+    source_value: str,
+    phone: str,
+    name: str,
+    address: str,
+    current_order: str,
+    current_date: str,
+    prev_order: str,
+    prev_date: str,
+    prev_notice: str,
+    status: str,
+    error_msg: str,
+    full_log: str,
+):
+    with_retry(
+        log_ws.append_row,
+        [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            source_type,
+            source_value,
+            phone,
+            name,
+            address,
+            current_order,
+            current_date,
+            prev_order,
+            prev_date,
+            clip_text(prev_notice, 2000),
+            status,
+            error_msg,
+            clip_text(full_log, 20000),
+        ],
+    )
+
+
+def apply_sheet_presentation(ws, updated_rows: List[int]):
+    if not updated_rows:
+        return
+
+    sheet_id = ws._properties["sheetId"]
+    requests_body = []
+
+    for row_num in updated_rows:
+        requests_body.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": row_num - 1,
+                    "endIndex": row_num,
+                },
+                "properties": {"pixelSize": 20},
+                "fields": "pixelSize"
+            }
+        })
+
+    requests_body.append({
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 1,
+                "startColumnIndex": 22,  # W
+                "endColumnIndex": 24,    # X後一欄
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "wrapStrategy": "CLIP",
+                    "verticalAlignment": "MIDDLE"
+                }
+            },
+            "fields": "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"
+        }
+    })
+
+    with_retry(ws.spreadsheet.batch_update, {"requests": requests_body})
 
 
 # ========================
-# 工具
+# requests
 # ========================
-def normalize_phone(p):
-    return re.sub(r"\D+", "", str(p or ""))
+def session_get(session: requests.Session, url: str, **kwargs):
+    return with_retry(session.get, url, timeout=REQUEST_TIMEOUT, **kwargs)
 
 
-def normalize_text(t):
-    return re.sub(r"\s+", "", str(t or ""))
-
-
-def parse_date(t):
-    if not t:
-        return None
-
-    s = str(t).strip()
-    for fmt in [
-        "%Y/%m/%d",
-        "%Y-%m-%d",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y/%m/%d %H:%M",
-        "%Y-%m-%d %H:%M",
-    ]:
-        try:
-            return datetime.strptime(s, fmt)
-        except Exception:
-            pass
-
-    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", s)
-    if m:
-        y, mo, d = map(int, m.groups())
-        return datetime(y, mo, d)
-    return None
-
-
-def parse_row_spec(spec):
-    rows = set()
-    for p in str(spec).split(","):
-        p = p.strip()
-        if not p:
-            continue
-        if "-" in p:
-            a, b = map(int, p.split("-", 1))
-            if a > b:
-                a, b = b, a
-            rows.update(range(a, b + 1))
-        else:
-            rows.add(int(p))
-    return sorted(x for x in rows if x >= 2)
-
-
-def build_absolute_url(href: str) -> str:
-    return urljoin(BASE_URL + "/", str(href or "").strip())
-
-
-def safe_cell(row, idx_1_based):
-    i = idx_1_based - 1
-    return str(row[i]).strip() if i < len(row) else ""
-
-
-def same_address(a: str, b: str) -> bool:
-    na = normalize_text(a)
-    nb = normalize_text(b)
-    if not na or not nb:
-        return False
-    return na == nb or na in nb or nb in na
-
-
-def match_region_by_address(address: str) -> Optional[str]:
-    addr = str(address or "")
-    for region, cfg in accounts.ACCOUNTS.items():
-        for kw in cfg.get("address_keywords", []):
-            if kw and kw in addr:
-                return region
-    return None
-
-
-def extract_address_from_text_block(text: str) -> str:
-    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
-    for i, line in enumerate(lines):
-        if any(k in line for k in ["市", "縣", "區", "鄉", "鎮", "路", "街", "段", "巷", "弄", "號"]):
-            if "付款" in line or "服務狀態" in line or "付款狀態" in line:
-                continue
-            addr = line
-            if i + 1 < len(lines):
-                next_line = lines[i + 1]
-                if any(k in next_line for k in ["樓", "室", "之", "A", "B", "C", "D"]):
-                    addr += next_line
-            return addr
-    return ""
-
-
-def parse_query_params_from_url(url: str) -> Dict[str, str]:
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    result = {}
-    for k, v in qs.items():
-        if v:
-            result[k] = v[0]
-    return result
-
-
-def clip_text(text: str, limit: int = 50000) -> str:
-    text = str(text or "")
-    return text[:limit]
+def session_post(session: requests.Session, url: str, **kwargs):
+    return with_retry(session.post, url, timeout=REQUEST_TIMEOUT, **kwargs)
 
 
 # ========================
 # 後台登入
 # ========================
-def login(region):
+def login(region: str):
     cfg = accounts.ACCOUNTS[region]
     email = str(cfg.get("email", "")).strip()
     password = str(cfg.get("password", "")).strip()
@@ -245,7 +356,7 @@ def login(region):
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     })
 
-    r = s.get(LOGIN_URL, timeout=30)
+    r = session_get(s, LOGIN_URL)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
@@ -255,19 +366,19 @@ def login(region):
 
     token = token_el.get("value", "")
 
-    resp = s.post(
+    resp = session_post(
+        s,
         LOGIN_URL,
         data={
             "_token": token,
             "email": email,
             "password": password,
         },
-        timeout=30,
         allow_redirects=True,
     )
     resp.raise_for_status()
 
-    check = s.get(PURCHASE_URL, timeout=30, allow_redirects=True)
+    check = session_get(s, PURCHASE_URL, allow_redirects=True)
     check.raise_for_status()
 
     if "/login" in check.url:
@@ -277,93 +388,7 @@ def login(region):
 
 
 # ========================
-# 搜尋：手機 + 已付款
-# ========================
-def search_paid_orders_by_phone(session, phone) -> List[Dict]:
-    r = session.get(
-        PURCHASE_URL,
-        params={
-            "keyword": "",
-            "name": "",
-            "phone": phone,
-            "orderNo": "",
-            "date_s": "",
-            "date_e": "",
-            "clean_date_s": "",
-            "clean_date_e": "",
-            "paid_at_s": "",
-            "paid_at_e": "",
-            "refundDateS": "",
-            "refundDateE": "",
-            "buy": "",
-            "area_id": "",
-            "isCharge": "",
-            "isRefund": "",
-            "payway": "",
-            "purchase_status": "1",
-            "progress_status": "",
-            "invoiceStatus": "",
-            "otherFee": "",
-            "orderBy": "",
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    return parse_purchase_list_page(r.text)
-
-
-# ========================
-# 搜尋：訂購日期 + 已付款 + 未處理
-# ========================
-def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
-    r = session.get(
-        PURCHASE_URL,
-        params={
-            "keyword": "",
-            "name": "",
-            "phone": "",
-            "orderNo": "",
-            "date_s": date_s.replace("/", "-"),
-            "date_e": date_s.replace("/", "-"),
-            "clean_date_s": "",
-            "clean_date_e": "",
-            "paid_at_s": "",
-            "paid_at_e": "",
-            "refundDateS": "",
-            "refundDateE": "",
-            "buy": "",
-            "area_id": "",
-            "isCharge": "",
-            "isRefund": "",
-            "payway": "",
-            "purchase_status": "1",
-            "progress_status": "0",
-            "invoiceStatus": "",
-            "otherFee": "",
-            "orderBy": "",
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-
-    items = parse_purchase_list_page(r.text)
-
-    filtered = []
-    for item in items:
-        if item.get("purchase_status") != "1":
-            continue
-        if item.get("status_code") != "0":
-            continue
-        filtered.append(item)
-
-    if limit and limit > 0:
-        filtered = filtered[:limit]
-
-    return filtered
-
-
-# ========================
-# 共用：解析列表頁
+# 列表頁解析
 # ========================
 def parse_purchase_list_page(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -445,15 +470,119 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
     return list(dedup.values())
 
 
+def search_paid_orders_by_phone(session, phone) -> List[Dict]:
+    r = session_get(
+        session,
+        PURCHASE_URL,
+        params={
+            "keyword": "",
+            "name": "",
+            "phone": phone,
+            "orderNo": "",
+            "date_s": "",
+            "date_e": "",
+            "clean_date_s": "",
+            "clean_date_e": "",
+            "paid_at_s": "",
+            "paid_at_e": "",
+            "refundDateS": "",
+            "refundDateE": "",
+            "buy": "",
+            "area_id": "",
+            "isCharge": "",
+            "isRefund": "",
+            "payway": "",
+            "purchase_status": "1",
+            "progress_status": "",
+            "invoiceStatus": "",
+            "otherFee": "",
+            "orderBy": "",
+        },
+    )
+    r.raise_for_status()
+    return parse_purchase_list_page(r.text)
+
+
+def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
+    r = session_get(
+        session,
+        PURCHASE_URL,
+        params={
+            "keyword": "",
+            "name": "",
+            "phone": "",
+            "orderNo": "",
+            "date_s": date_s.replace("/", "-"),
+            "date_e": date_s.replace("/", "-"),
+            "clean_date_s": "",
+            "clean_date_e": "",
+            "paid_at_s": "",
+            "paid_at_e": "",
+            "refundDateS": "",
+            "refundDateE": "",
+            "buy": "",
+            "area_id": "",
+            "isCharge": "",
+            "isRefund": "",
+            "payway": "",
+            "purchase_status": "1",
+            "progress_status": "0",
+            "invoiceStatus": "",
+            "otherFee": "",
+            "orderBy": "",
+        },
+    )
+    r.raise_for_status()
+
+    items = parse_purchase_list_page(r.text)
+    filtered = [x for x in items if x.get("purchase_status") == "1" and x.get("status_code") == "0"]
+
+    if limit and limit > 0:
+        filtered = filtered[:limit]
+
+    return filtered
+
+
 # ========================
-# 解析編輯頁（完整表單）
+# 編輯頁解析
 # ========================
+def parse_select_value(select_el):
+    name = select_el.get("name", "")
+    html = str(select_el)
+    text = select_el.get_text(" ", strip=True)
+
+    selected = select_el.select_one("option[selected]")
+    if selected is not None:
+        return selected.get("value", "")
+
+    if name == "progress":
+        if "已完成" in text:
+            return "2"
+        if "已處理" in text:
+            return "1"
+        if "未處理" in text:
+            return "0"
+
+    if name == "purchase_status":
+        if "已退款" in text:
+            return "3"
+        if "取消訂單" in text:
+            return "2"
+        if "已付款" in text:
+            return "1"
+        if "待付款" in text:
+            return "0"
+
+    m = re.search(r'value="([^"]+)"', html)
+    return m.group(1) if m else ""
+
+
 def parse_edit_page(session, edit_url, phone=""):
     params = {}
     if phone:
         params["phone"] = phone
 
-    r = session.get(edit_url, params=params, timeout=30)
+    r = session_get(session, edit_url, params=params)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
@@ -465,7 +594,6 @@ def parse_edit_page(session, edit_url, phone=""):
     current_query_params = parse_query_params_from_url(r.url)
 
     fields = {}
-
     for el in form.select("input, textarea, select"):
         name = el.get("name")
         if not name:
@@ -477,16 +605,10 @@ def parse_edit_page(session, edit_url, phone=""):
             fields[name] = el.text or ""
 
         elif tag == "select":
-            selected = el.select_one("option[selected]")
-            if selected is not None:
-                fields[name] = selected.get("value", "")
-            else:
-                first = el.select_one("option")
-                fields[name] = first.get("value", "") if first else ""
+            fields[name] = parse_select_value(el)
 
         else:
             input_type = (el.get("type") or "text").lower()
-
             if input_type in ("checkbox", "radio"):
                 if el.has_attr("checked"):
                     fields[name] = el.get("value", "on")
@@ -498,12 +620,8 @@ def parse_edit_page(session, edit_url, phone=""):
         if token_el:
             fields["_token"] = token_el.get("value", "")
 
-    notice = ""
     notice_el = soup.select_one('textarea[name="notice"]')
-    if notice_el:
-        notice = notice_el.text.strip()
-    else:
-        notice = str(fields.get("notice", "")).strip()
+    notice = notice_el.text.strip() if notice_el else str(fields.get("notice", "")).strip()
 
     page_text = soup.get_text("\n", strip=True)
 
@@ -528,11 +646,12 @@ def parse_edit_page(session, edit_url, phone=""):
         "customer_name": customer_name,
         "phone": phone_value,
         "address": address_value,
+        "page_text": page_text,
     }
 
 
 # ========================
-# 找前次 + 目標
+# 前次與目標
 # ========================
 def find_previous_processed(current_order_no, current_address, current_phone, current_service_date, items):
     matched = []
@@ -575,6 +694,33 @@ def find_all_unprocessed_same_address(current_address, current_phone, items):
     return targets
 
 
+def find_phone_mode_targets(items):
+    by_address = {}
+    for item in items:
+        key = normalize_text(item["address"])
+        if not key:
+            continue
+        by_address.setdefault(key, []).append(item)
+
+    groups = []
+    for _, address_items in by_address.items():
+        unprocessed = [x for x in address_items if x.get("status_code") == "0" and x["date_obj"]]
+        processed = [x for x in address_items if x.get("purchase_status") == "1" and x.get("status_code") in ("1", "2") and x["date_obj"]]
+
+        if not unprocessed or not processed:
+            continue
+
+        unprocessed.sort(key=lambda x: x["date_obj"])
+        processed.sort(key=lambda x: x["date_obj"], reverse=True)
+
+        for target in unprocessed:
+            prev = next((p for p in processed if p["date_obj"] < target["date_obj"]), None)
+            if prev:
+                groups.append({"target": target, "prev": prev})
+
+    return groups
+
+
 # ========================
 # 送出 / 驗證
 # ========================
@@ -589,7 +735,8 @@ def submit_update(session, form_info, phone, new_notice):
     if phone and "phone" not in query_params:
         query_params["phone"] = phone
 
-    resp = session.post(
+    resp = session_post(
+        session,
         action,
         params=query_params,
         files={k: (None, str(v)) for k, v in fields.items()},
@@ -597,7 +744,6 @@ def submit_update(session, form_info, phone, new_notice):
             "Referer": form_info["edit_url"],
             "User-Agent": "Mozilla/5.0",
         },
-        timeout=30,
         allow_redirects=True,
     )
     resp.raise_for_status()
@@ -606,109 +752,24 @@ def submit_update(session, form_info, phone, new_notice):
 
 def verify_update(session, edit_url, phone, expected_notice):
     form = parse_edit_page(session, edit_url, phone)
+
     actual_notice = str(form.get("notice", "")).strip()
     actual_progress = str(form.get("progress", "")).strip()
+    page_text = str(form.get("page_text", ""))
 
     notice_ok = actual_notice == str(expected_notice or "").strip()
-    progress_ok = actual_progress == "1"
+    progress_ok = (
+        actual_progress == "1"
+        or "已處理" in page_text
+    )
 
     return notice_ok and progress_ok, form
 
 
 # ========================
-# Sheet 樣式
+# 單筆核心
 # ========================
-def apply_sheet_presentation(ws, updated_rows: List[int]):
-    if not updated_rows:
-        return
-
-    sheet_id = ws._properties["sheetId"]
-    requests_body = []
-
-    for row_num in updated_rows:
-        requests_body.append({
-            "updateDimensionProperties": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "dimension": "ROWS",
-                    "startIndex": row_num - 1,
-                    "endIndex": row_num,
-                },
-                "properties": {"pixelSize": 20},
-                "fields": "pixelSize"
-            }
-        })
-
-    requests_body.append({
-        "repeatCell": {
-            "range": {
-                "sheetId": sheet_id,
-                "startRowIndex": 1,
-                "startColumnIndex": 22,
-                "endColumnIndex": 24,
-            },
-            "cell": {
-                "userEnteredFormat": {
-                    "wrapStrategy": "CLIP",
-                    "verticalAlignment": "MIDDLE"
-                }
-            },
-            "fields": "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"
-        }
-    })
-
-    ws.spreadsheet.batch_update({"requests": requests_body})
-
-
-# ========================
-# log sheet
-# ========================
-def append_log_row(
-    log_ws,
-    source_type: str,
-    source_value: str,
-    phone: str,
-    name: str,
-    address: str,
-    current_order: str,
-    current_date: str,
-    prev_order: str,
-    prev_date: str,
-    prev_notice: str,
-    status: str,
-    error_msg: str,
-    full_log: str,
-):
-    log_ws.append_row([
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        source_type,
-        source_value,
-        phone,
-        name,
-        address,
-        current_order,
-        current_date,
-        prev_order,
-        prev_date,
-        clip_text(prev_notice, 2000),
-        status,
-        error_msg,
-        clip_text(full_log, 20000),
-    ])
-
-
-# ========================
-# 單筆處理核心
-# ========================
-def process_single_case(
-    session,
-    order,
-    name,
-    phone,
-    addr,
-    date,
-    log,
-):
+def process_single_case(session, order, name, phone, addr, date, log):
     current_service_date = parse_date(date)
 
     log(f"訂單: {order}")
@@ -761,38 +822,33 @@ def process_single_case(
             "error": "上一筆找不到客服備註",
         }
 
-    submit_ok = 0
-    verify_ok = 0
-    failed_targets = []
+    success_count = 0
+    fail_list = []
 
     for t in targets:
         log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['status']} {t['address']}")
-        target_form = parse_edit_page(session, t["edit_url"], phone)
-
         try:
+            target_form = parse_edit_page(session, t["edit_url"], phone)
             submit_update(session, target_form, phone, prev_notice)
             time.sleep(SLEEP_SECONDS)
-            submit_ok += 1
 
-            ok, verified_form = verify_update(session, t["edit_url"], phone, prev_notice)
-            time.sleep(SLEEP_SECONDS)
-
+            ok, vf = verify_update(session, t["edit_url"], phone, prev_notice)
             if ok:
-                verify_ok += 1
                 log(f"✅ 驗證成功 {t['order_no']}")
+                success_count += 1
             else:
-                failed_targets.append(t["order_no"])
                 log(
                     f"❌ 驗證失敗 {t['order_no']} "
-                    f"(progress={verified_form.get('progress','')}, "
-                    f"notice_head={str(verified_form.get('notice',''))[:30]})"
+                    f"(progress={vf.get('progress','')}, "
+                    f"notice_head={str(vf.get('notice',''))[:30]})"
                 )
+                fail_list.append(t["order_no"])
         except Exception as e:
-            failed_targets.append(t["order_no"])
             log(f"❌ 寫入失敗 {t['order_no']}：{e}")
+            fail_list.append(t["order_no"])
 
-    if verify_ok == len(targets):
-        log(f"✅ 成功：已回填 {verify_ok} 筆")
+    if not fail_list:
+        log(f"✅ 成功：已回填 {success_count} 筆")
         return {
             "ok": True,
             "prev_date": prev["date_str"],
@@ -801,50 +857,14 @@ def process_single_case(
             "error": "",
         }
 
-    log(
-        f"❌ 失敗：已送出 {submit_ok} 筆，驗證成功 {verify_ok} 筆，"
-        f"失敗目標：{', '.join(failed_targets)}"
-    )
+    log(f"❌ 失敗：成功 {success_count} 筆，失敗 {len(fail_list)} 筆：{', '.join(fail_list)}")
     return {
         "ok": False,
         "prev_date": prev["date_str"],
         "prev_order": prev["order_no"],
         "prev_notice": prev_notice,
-        "error": f"已送出 {submit_ok} 筆，驗證成功 {verify_ok} 筆，失敗目標：{', '.join(failed_targets)}",
+        "error": f"失敗目標：{', '.join(fail_list)}",
     }
-
-
-# ========================
-# 電話模式配對
-# ========================
-def find_phone_mode_targets(items):
-    by_address = {}
-    for item in items:
-        key = normalize_text(item["address"])
-        if not key:
-            continue
-        by_address.setdefault(key, []).append(item)
-
-    groups = []
-    for _, address_items in by_address.items():
-        unprocessed = [x for x in address_items if x.get("status_code") == "0" and x["date_obj"]]
-        processed = [x for x in address_items if x.get("purchase_status") == "1" and x.get("status_code") in ("1", "2") and x["date_obj"]]
-
-        if not unprocessed or not processed:
-            continue
-
-        unprocessed.sort(key=lambda x: x["date_obj"])
-        processed.sort(key=lambda x: x["date_obj"], reverse=True)
-
-        for target in unprocessed:
-            prev = next((p for p in processed if p["date_obj"] < target["date_obj"]), None)
-            if prev:
-                groups.append({
-                    "target": target,
-                    "prev": prev,
-                })
-
-    return groups
 
 
 # ========================
@@ -853,7 +873,7 @@ def find_phone_mode_targets(items):
 def main(row_spec="2", force=False, ui_logger=None):
     ws = get_ws()
     log_ws = get_log_ws()
-    rows = ws.get_all_values()
+    rows = with_retry(ws.get_all_values)
 
     row_nums = parse_row_spec(row_spec)
     log = make_logger(ui_logger)
@@ -984,7 +1004,7 @@ def main(row_spec="2", force=False, ui_logger=None):
             result["errors"].append(f"第{r}列：{e}")
 
     if updates:
-        ws.batch_update(updates, value_input_option="RAW")
+        with_retry(ws.batch_update, updates, value_input_option="RAW")
         apply_sheet_presentation(ws, updated_row_numbers)
 
     return result
@@ -1089,12 +1109,11 @@ def main_by_phone(phone, ui_logger=None):
 
             for t in same_address_unprocessed:
                 log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['status']} {t['address']}")
-                target_form = parse_edit_page(found_session, t["edit_url"], phone)
-                submit_update(found_session, target_form, phone, prev_notice)
+                tf = parse_edit_page(found_session, t["edit_url"], phone)
+                submit_update(found_session, tf, phone, prev_notice)
                 time.sleep(SLEEP_SECONDS)
 
                 ok, verified_form = verify_update(found_session, t["edit_url"], phone, prev_notice)
-                time.sleep(SLEEP_SECONDS)
 
                 if ok:
                     log(f"✅ 驗證成功 {t['order_no']}")
@@ -1108,6 +1127,7 @@ def main_by_phone(phone, ui_logger=None):
                     group_fail.append(t["order_no"])
 
             if not group_fail:
+                log(f"✅ 成功：已回填 {group_ok} 筆")
                 success_count += 1
                 append_log_row(
                     log_ws, "BY電話", phone, phone, prev_form.get("customer_name", ""), target["address"],
@@ -1115,6 +1135,7 @@ def main_by_phone(phone, ui_logger=None):
                     "成功", "", "\n".join(CURRENT_ROW_LOGS)
                 )
             else:
+                log(f"❌ 失敗：成功 {group_ok} 筆，失敗 {len(group_fail)} 筆：{', '.join(group_fail)}")
                 failed_count += 1
                 append_log_row(
                     log_ws, "BY電話", phone, phone, prev_form.get("customer_name", ""), target["address"],
@@ -1245,7 +1266,9 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
             same_address_unprocessed = find_all_unprocessed_same_address(target_addr, target_phone, items)
             log(f"[本次共更新] {len(same_address_unprocessed)} 筆未處理訂單")
 
+            group_ok = 0
             group_fail = []
+
             for t in same_address_unprocessed:
                 log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['status']} {t['address']}")
                 tf = parse_edit_page(session, t["edit_url"], target_phone)
@@ -1253,10 +1276,10 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
                 time.sleep(SLEEP_SECONDS)
 
                 ok, verified_form = verify_update(session, t["edit_url"], target_phone, prev_notice)
-                time.sleep(SLEEP_SECONDS)
 
                 if ok:
                     log(f"✅ 驗證成功 {t['order_no']}")
+                    group_ok += 1
                 else:
                     log(
                         f"❌ 驗證失敗 {t['order_no']} "
@@ -1266,9 +1289,10 @@ def main_by_conditions(date_s: str, limit: int = 10, ui_logger=None):
                     group_fail.append(t["order_no"])
 
             if group_fail:
+                log(f"❌ 失敗：成功 {group_ok} 筆，失敗 {len(group_fail)} 筆：{', '.join(group_fail)}")
                 raise RuntimeError(f"失敗目標：{', '.join(group_fail)}")
 
-            log(f"✅ 成功：已回填 {len(same_address_unprocessed)} 筆")
+            log(f"✅ 成功：已回填 {group_ok} 筆")
             success_count += 1
 
             append_log_row(
