@@ -4,70 +4,79 @@ import memo
 
 st.set_page_config(page_title="Memo 自動回填系統", layout="wide")
 
-# ── 樣式 ──────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;600&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'DM Sans', 'Noto Sans TC', sans-serif;
-}
+html, body, [class*="css"] { font-family: 'DM Sans', 'Noto Sans TC', sans-serif; }
 
-/* 頁面標題 */
-h1 { font-size: 22px !important; font-weight: 600 !important; margin-bottom: 0 !important; }
+/* 大幅縮減 block 間距 */
+.block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
+[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stVerticalBlock"] > div { gap: 0 !important; }
 
-/* Section 標題統一 */
-h3 { font-size: 13px !important; font-weight: 500 !important;
-     color: #8892b0 !important; letter-spacing: 0.08em !important;
-     text-transform: uppercase !important; margin-bottom: 8px !important; margin-top: 20px !important; }
+/* 壓縮各元件的 margin */
+h1 { font-size: 20px !important; font-weight: 600 !important; margin: 0 0 12px 0 !important; }
+h3 { font-size: 11.5px !important; font-weight: 500 !important; color: #888 !important;
+     letter-spacing: 0.08em !important; text-transform: uppercase !important;
+     margin: 14px 0 4px 0 !important; }
+hr { border-color: rgba(0,0,0,0.08) !important; margin: 10px 0 !important; }
 
-/* 分隔線 */
-hr { border-color: rgba(255,255,255,0.07) !important; margin: 18px 0 !important; }
+/* Radio */
+[data-testid="stRadio"] { margin-bottom: 2px !important; }
+[data-testid="stRadio"] > label { margin-bottom: 2px !important; font-size: 13px !important; }
+[data-testid="stRadio"] > div { gap: 6px !important; margin-top: 2px !important; }
 
-/* Radio 按鈕組 */
-[data-testid="stRadio"] > div { gap: 8px !important; }
-[data-testid="stRadio"] label {
-    background: rgba(255,255,255,0.04) !important;
-    border: 1px solid rgba(255,255,255,0.09) !important;
-    border-radius: 7px !important; padding: 6px 16px !important;
-    font-size: 13.5px !important; transition: all 0.15s !important;
-}
-[data-testid="stRadio"] label:hover { border-color: #8ba4ff !important; }
-[data-testid="stRadio"] label[data-checked="true"] {
-    background: rgba(139,164,255,0.12) !important;
-    border-color: #8ba4ff !important; color: #8ba4ff !important;
-}
+/* Caption */
+[data-testid="stCaptionContainer"] { margin-top: 2px !important; margin-bottom: 0 !important;
+    font-size: 12px !important; color: #999 !important; }
 
-/* 執行按鈕 */
-[data-testid="stButton"] > button[kind="primary"],
+/* Text input */
+[data-testid="stTextInput"] { margin-bottom: 0 !important; }
+[data-testid="stTextInput"] label { font-size: 12.5px !important; margin-bottom: 2px !important; color: #555 !important; }
+[data-testid="stTextInput"] input { font-size: 13.5px !important; padding: 7px 10px !important; border-radius: 7px !important; }
+
+/* Checkbox */
+[data-testid="stCheckbox"] { margin-top: 6px !important; }
+[data-testid="stCheckbox"] label { font-size: 13px !important; }
+
+/* Number input */
+[data-testid="stNumberInput"] label { font-size: 12.5px !important; color: #555 !important; }
+
+/* 執行按鈕 — 黑色 */
 [data-testid="stButton"] > button {
-    background: linear-gradient(135deg, #6c8fff, #a78bfa) !important;
-    border: none !important; color: #fff !important; font-weight: 500 !important;
-    font-size: 14px !important; border-radius: 9px !important;
-    padding: 10px 0 !important; letter-spacing: 0.02em !important;
-    box-shadow: 0 4px 14px rgba(108,143,255,0.3) !important;
-    transition: opacity 0.2s !important;
+    background: #1a1a1a !important;
+    border: none !important;
+    color: #fff !important;
+    font-weight: 500 !important;
+    font-size: 14px !important;
+    border-radius: 8px !important;
+    padding: 9px 0 !important;
+    letter-spacing: 0.02em !important;
+    transition: background 0.18s !important;
+    box-shadow: none !important;
 }
-[data-testid="stButton"] > button:hover { opacity: 0.88 !important; }
+[data-testid="stButton"] > button:hover { background: #333 !important; }
 
-/* Log 區塊 */
+/* Log */
 [data-testid="stCode"] {
-    background: #141622 !important; border-radius: 9px !important;
-    border: 1px solid rgba(255,255,255,0.07) !important;
-    font-size: 12px !important; max-height: 320px; overflow-y: auto;
+    font-size: 12px !important; border-radius: 8px !important;
+    max-height: 280px; overflow-y: auto;
+    margin-top: 4px !important;
 }
 
 /* Metric 卡片 */
 [data-testid="stMetric"] {
-    background: rgba(255,255,255,0.03) !important;
-    border: 1px solid rgba(255,255,255,0.08) !important;
-    border-radius: 10px !important; padding: 14px 16px !important;
+    background: #f8f9fb !important;
+    border: 1px solid #eaecf0 !important;
+    border-radius: 9px !important;
+    padding: 12px 14px !important;
 }
-[data-testid="stMetricLabel"] { font-size: 12px !important; color: #6b7290 !important; }
-[data-testid="stMetricValue"] { font-size: 26px !important; font-weight: 600 !important; }
+[data-testid="stMetricLabel"] { font-size: 12px !important; color: #888 !important; }
+[data-testid="stMetricValue"] { font-size: 24px !important; font-weight: 600 !important; }
 
-/* Caption */
-[data-testid="stCaptionContainer"] { color: #4e5470 !important; font-size: 12px !important; }
+/* Alert */
+[data-testid="stAlert"] { border-radius: 8px !important; font-size: 13px !important; margin-top: 8px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,7 +85,6 @@ DEFAULT_RESULT = {
     "processed": 0, "success": 0, "failed": 0,
     "skipped": 0, "updated_orders": 0, "errors": [],
 }
-
 if "logs"        not in st.session_state: st.session_state.logs = []
 if "last_result" not in st.session_state: st.session_state.last_result = None
 if "ran"         not in st.session_state: st.session_state.ran = False
@@ -116,10 +124,8 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 # ── 3. 模式 ───────────────────────────────────────────────
 st.subheader("處理模式")
-mode = st.radio(
-    "mode", ["By Google Sheet 列號", "By 電話", "By 搜尋條件"],
-    horizontal=True, label_visibility="collapsed"
-)
+mode = st.radio("mode", ["By Google Sheet 列號", "By 電話", "By 搜尋條件"],
+                horizontal=True, label_visibility="collapsed")
 
 row_spec = phone = date_s = ""
 limit = 5; force = False
@@ -128,12 +134,10 @@ if mode == "By Google Sheet 列號":
     col_r, col_f = st.columns([3, 1])
     with col_r: row_spec = st.text_input("列號（例：2,3,5-8）", "2,3,5-8")
     with col_f:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
         force = st.checkbox("強制重跑", value=False)
-
 elif mode == "By 電話":
     phone = st.text_input("電話號碼")
-
 elif mode == "By 搜尋條件":
     c1, c2 = st.columns(2)
     with c1: date_s = st.text_input("訂購日期 YYYY/MM/DD")
@@ -168,8 +172,6 @@ def render_result(result):
     with result_area.container():
         st.markdown("<hr>", unsafe_allow_html=True)
         st.subheader("執行結果")
-
-        # 各狀態數字
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("執行筆數", r["processed"])
         c2.metric("成功",     r["success"])
@@ -177,7 +179,6 @@ def render_result(result):
         c4.metric("略過",     r["skipped"])
         c5.metric("回寫筆數", r["updated_orders"])
 
-        # 結果說明
         if r["failed"] == 0 and r["processed"] > 0:
             st.success(f"✅ 全部執行完成，共處理 {r['processed']} 筆，成功 {r['success']} 筆。")
         elif r["failed"] > 0:
@@ -185,13 +186,11 @@ def render_result(result):
         else:
             st.info("執行完成，無資料被處理。")
 
-        # 錯誤明細
         if r["errors"]:
             st.subheader("錯誤明細")
             for err in r["errors"]:
                 st.error(err)
 
-# 若上次有結果，重新渲染（頁面 rerun 後保留）
 if st.session_state.ran and st.session_state.last_result:
     render_result(st.session_state.last_result)
 
@@ -213,20 +212,14 @@ if run:
     else:
         try:
             ui_log("===== 開始執行 =====")
-
             if mode == "By Google Sheet 列號":
-                if not hasattr(memo, "main"):
-                    raise RuntimeError("memo.py 缺少 main()")
+                if not hasattr(memo, "main"): raise RuntimeError("memo.py 缺少 main()")
                 result = memo.main(row_spec=row_spec, force=force, ui_logger=ui_log)
-
             elif mode == "By 電話":
-                if not hasattr(memo, "main_by_phone"):
-                    raise RuntimeError("memo.py 缺少 main_by_phone()")
+                if not hasattr(memo, "main_by_phone"): raise RuntimeError("memo.py 缺少 main_by_phone()")
                 result = memo.main_by_phone(phone=phone, ui_logger=ui_log)
-
             else:
-                if not hasattr(memo, "main_by_conditions"):
-                    raise RuntimeError("memo.py 缺少 main_by_conditions()")
+                if not hasattr(memo, "main_by_conditions"): raise RuntimeError("memo.py 缺少 main_by_conditions()")
                 result = memo.main_by_conditions(date_s=date_s, limit=int(limit), ui_logger=ui_log)
 
             ui_log("===== 執行完成 =====")
