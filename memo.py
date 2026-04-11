@@ -111,7 +111,18 @@ def normalize_text(t: str) -> str:
 
 
 def normalize_address(addr: str) -> str:
-    return normalize_text(addr)
+    s = str(addr or "").strip()
+    s = normalize_text(s)
+    s = s.replace("臺", "台")
+    s = s.replace("，", ",")
+    s = s.replace("（", "(").replace("）", ")")
+    s = s.replace("－", "-").replace("–", "-").replace("—", "-")
+    s = s.replace("之", "-")
+    s = s.replace("號-", "號")
+    s = s.replace("樓-", "樓")
+    s = s.replace(",", "")
+    s = s.replace("　", "")
+    return s
 
 
 def same_address(a: str, b: str) -> bool:
@@ -228,6 +239,10 @@ def get_purchase_id_from_edit_url(edit_url: str) -> str:
 
 def display_service_date(item: Dict) -> str:
     return item.get("service_date") or item.get("raw_date_str") or ""
+
+
+def item_service_date_obj(item: Dict):
+    return item.get("service_date_obj") or item.get("raw_date_obj")
 
 
 def get_spreadsheet():
@@ -696,20 +711,19 @@ def parse_edit_page(session, edit_url, phone=""):
 
 
 def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
-    if item.get("service_date") and item.get("service_date_obj"):
-        return item
     if not item.get("edit_url"):
         return item
 
     detail = parse_edit_page(session, item["edit_url"], phone)
-    item["service_date"] = detail.get("service_date", "")
-    item["service_date_obj"] = detail.get("service_date_obj")
-    if not item.get("phone"):
-        item["phone"] = detail.get("phone", "")
-    if not item.get("name"):
-        item["name"] = detail.get("customer_name", "")
-    if not item.get("address"):
-        item["address"] = detail.get("address", "")
+
+    item["service_date"] = detail.get("service_date", "") or item.get("service_date", "")
+    item["service_date_obj"] = detail.get("service_date_obj") or item.get("service_date_obj")
+
+    # 明細頁資料優先，避免列表頁 regex 抓到殘缺地址造成誤判
+    item["phone"] = detail.get("phone", "") or item.get("phone", "")
+    item["name"] = detail.get("customer_name", "") or item.get("name", "")
+    item["address"] = detail.get("address", "") or item.get("address", "")
+
     return item
 
 
@@ -723,8 +737,38 @@ def enrich_items_from_detail(session, items: List[Dict], phone="") -> List[Dict]
     return result
 
 
-def item_service_date_obj(item: Dict):
-    return item.get("service_date_obj") or item.get("raw_date_obj")
+def dedupe_items_by_address(items: List[Dict]) -> List[Dict]:
+    by_address = {}
+
+    for item in items:
+        key = normalize_address(item.get("address", ""))
+        if not key:
+            continue
+
+        existed = by_address.get(key)
+        current_dt = item_service_date_obj(item) or datetime.min
+
+        if not existed:
+            by_address[key] = item
+            continue
+
+        existed_dt = item_service_date_obj(existed) or datetime.min
+        if current_dt > existed_dt:
+            by_address[key] = item
+
+    result = list(by_address.values())
+    result.sort(key=lambda x: item_service_date_obj(x) or datetime.min, reverse=True)
+    return result
+
+
+def log_candidate_addresses(log, items: List[Dict]):
+    log("\n[列表頁候選 - 各地址一筆]")
+    deduped = dedupe_items_by_address(items)
+    for i in deduped:
+        log(
+            f"{display_service_date(i)} {i['order_no']} "
+            f"{i.get('name','')} {i['purchase_status_name']} {i['status']} {i['address']}"
+        )
 
 
 def find_previous_processed_verbose(current_order_no, current_address, current_phone, current_service_date, items):
@@ -803,8 +847,16 @@ def find_phone_mode_targets(items):
 
     groups = []
     for _, address_items in by_address.items():
-        unprocessed = [x for x in address_items if x.get("status_code") == "0" and item_service_date_obj(x)]
-        processed = [x for x in address_items if x.get("purchase_status") == "1" and x.get("status_code") in ("1", "2") and item_service_date_obj(x)]
+        unprocessed = [
+            x for x in address_items
+            if x.get("status_code") == "0" and item_service_date_obj(x)
+        ]
+        processed = [
+            x for x in address_items
+            if x.get("purchase_status") == "1"
+            and x.get("status_code") in ("1", "2")
+            and item_service_date_obj(x)
+        ]
 
         if not unprocessed or not processed:
             continue
@@ -889,9 +941,7 @@ def process_single_case(session, order, name, phone, addr, date, log):
     items = search_paid_orders_by_phone(session, phone)
     items = enrich_items_from_detail(session, items, phone)
 
-    log("\n[列表頁候選]")
-    for i in items:
-        log(f"{display_service_date(i)} {i['order_no']} {i.get('name','')} {i['purchase_status_name']} {i['status']} {i['address']}")
+    log_candidate_addresses(log, items)
 
     prev, reason = find_previous_processed_verbose(order, addr, phone, current_service_date, items)
     if not prev:
@@ -1159,9 +1209,7 @@ def main_by_phone(phone, ui_logger=None):
         append_log_row(log_ws, "BY電話", phone, phone, "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS))
         return result
 
-    log("\n[列表頁候選]")
-    for i in items:
-        log(f"{display_service_date(i)} {i['order_no']} {i.get('name','')} {i['purchase_status_name']} {i['status']} {i['address']}")
+    log_candidate_addresses(log, items)
 
     groups = find_phone_mode_targets(items)
     if not groups:
@@ -1349,9 +1397,7 @@ def main_by_conditions(date_mode: str, date_start: str, date_end: str, purchase_
             items = search_paid_orders_by_phone(session, target_phone)
             items = enrich_items_from_detail(session, items, target_phone)
 
-            log("\n[列表頁候選]")
-            for i in items:
-                log(f"{display_service_date(i)} {i['order_no']} {i.get('name','')} {i['purchase_status_name']} {i['status']} {i['address']}")
+            log_candidate_addresses(log, items)
 
             prev, reason = find_previous_processed_verbose(
                 current_order_no=target["order_no"],
