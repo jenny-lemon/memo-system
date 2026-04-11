@@ -189,26 +189,30 @@ def parse_query_params_from_url(url: str) -> Dict[str, str]:
     return result
 
 
-def extract_address_from_text_block(text: str) -> str:
-    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
-    for i, line in enumerate(lines):
-        if any(k in line for k in ["市", "縣", "區", "鄉", "鎮", "路", "街", "段", "巷", "弄", "號"]):
-            if "付款" in line or "服務狀態" in line or "付款狀態" in line:
-                continue
-            addr = line
-            if i + 1 < len(lines):
-                nxt = lines[i + 1]
-                if any(k in nxt for k in ["樓", "室", "之", "A", "B", "C", "D", "1", "2", "3", "4", "5"]):
-                    addr += nxt
-            return addr
-    return ""
-
-
 def extract_name_from_text_block(text: str) -> str:
     lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
     for line in lines:
         if re.search(r"^[\u4e00-\u9fff]{2,4}$", line):
             return line
+    return ""
+
+
+def extract_address_from_text_block(text: str) -> str:
+    text = str(text or "")
+
+    city_pattern = r"(?:台北市|臺北市|新北市|桃園市|新竹市|新竹縣|台中市|臺中市|彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|台南市|臺南市|高雄市|屏東縣|宜蘭縣|花蓮縣|台東縣|臺東縣|基隆市)"
+    patterns = [
+        rf"({city_pattern}[^\n]*?號(?:之\d+)?(?:\d+樓)?(?:之\d+)?(?:\d+室)?)",
+        rf"({city_pattern}[^\n]*?樓之\d+)",
+        rf"({city_pattern}[^\n]*?\d+樓)",
+        rf"({city_pattern}[^\n]*?號)",
+    ]
+
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            return m.group(1).strip()
+
     return ""
 
 
@@ -401,6 +405,67 @@ def login():
 # ========================
 # List parsing
 # ========================
+def parse_purchase_row_text(txt: str) -> Dict:
+    txt = str(txt or "")
+
+    order_no = ""
+    order_m = re.search(r"(LC\d+)", txt)
+    if order_m:
+        order_no = order_m.group(1)
+
+    dates = re.findall(r"\d{4}-\d{2}-\d{2}", txt)
+    date_str = dates[0].replace("-", "/") if dates else ""
+    date_obj = parse_date(dates[0]) if dates else None
+
+    status = ""
+    status_code = ""
+    if "未處理" in txt:
+        status = "未處理"
+        status_code = "0"
+    elif "已處理" in txt:
+        status = "已處理"
+        status_code = "1"
+    elif "已完成" in txt:
+        status = "已完成"
+        status_code = "2"
+
+    purchase_status_name = ""
+    purchase_status = ""
+    if "待付款" in txt:
+        purchase_status_name = "待付款"
+        purchase_status = "0"
+    elif "已付款" in txt:
+        purchase_status_name = "已付款"
+        purchase_status = "1"
+    elif "取消訂單" in txt:
+        purchase_status_name = "取消訂單"
+        purchase_status = "2"
+    elif "已退款" in txt:
+        purchase_status_name = "已退款"
+        purchase_status = "3"
+
+    address = extract_address_from_text_block(txt)
+    name = extract_name_from_text_block(txt)
+
+    phone = ""
+    m_phone = re.search(r"(09\d{8})", txt)
+    if m_phone:
+        phone = m_phone.group(1)
+
+    return {
+        "order_no": order_no,
+        "date_str": date_str,
+        "date_obj": date_obj,
+        "status": status,
+        "status_code": status_code,
+        "address": address,
+        "phone": phone,
+        "name": name,
+        "purchase_status_name": purchase_status_name,
+        "purchase_status": purchase_status,
+    }
+
+
 def parse_purchase_list_page(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
     data = []
@@ -411,71 +476,15 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
 
     for tr in rows:
         txt = tr.get_text("\n", strip=True)
-
-        m = re.search(r"(LC\d+)", txt)
-        if not m:
+        row_data = parse_purchase_row_text(txt)
+        if not row_data["order_no"]:
             continue
-
-        order_no = m.group(1)
-
-        date_str = ""
-        date_obj = None
-        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", txt)
-        if date_match:
-            date_str = date_match.group(1).replace("-", "/")
-            date_obj = parse_date(date_match.group(1))
-
-        status = ""
-        status_code = ""
-        if "未處理" in txt:
-            status = "未處理"
-            status_code = "0"
-        elif "已處理" in txt:
-            status = "已處理"
-            status_code = "1"
-        elif "已完成" in txt:
-            status = "已完成"
-            status_code = "2"
-
-        purchase_status_name = ""
-        purchase_status = ""
-        if "待付款" in txt:
-            purchase_status_name = "待付款"
-            purchase_status = "0"
-        elif "已付款" in txt:
-            purchase_status_name = "已付款"
-            purchase_status = "1"
-        elif "取消訂單" in txt:
-            purchase_status_name = "取消訂單"
-            purchase_status = "2"
-        elif "已退款" in txt:
-            purchase_status_name = "已退款"
-            purchase_status = "3"
-
-        address = extract_address_from_text_block(txt)
-        name = extract_name_from_text_block(txt)
-
-        phone = ""
-        m_phone = re.search(r"(09\d{8})", txt)
-        if m_phone:
-            phone = m_phone.group(1)
 
         edit_link = tr.select_one('a[href*="/purchase/edit/"]')
         edit_url = build_absolute_url(edit_link["href"]) if edit_link else ""
 
-        data.append({
-            "order_no": order_no,
-            "date_str": date_str,
-            "date_obj": date_obj,
-            "status": status,
-            "status_code": status_code,
-            "address": address,
-            "phone": phone,
-            "name": name,
-            "edit_url": edit_url,
-            "purchase_status_name": purchase_status_name,
-            "purchase_status": purchase_status,
-        })
+        row_data["edit_url"] = edit_url
+        data.append(row_data)
 
     dedup = {}
     for item in data:
@@ -792,7 +801,7 @@ def process_single_case(session, order, name, phone, addr, date, log):
 
     log("\n[列表頁候選]")
     for i in items:
-        log(f"{i['order_no']} {i['date_str']} {i['purchase_status_name']} {i['status']} {i['address']}")
+        log(f"{i['date_str']} {i['order_no']} {i['purchase_status_name']} {i['status']} {i['address']}")
 
     prev = find_previous_processed(order, addr, phone, current_service_date, items)
     if not prev:
@@ -818,7 +827,7 @@ def process_single_case(session, order, name, phone, addr, date, log):
             "error": "沒有未處理目標單",
         }
 
-    log(f"\n[上一筆] {prev['order_no']} {prev['date_str']} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
+    log(f"\n[上一筆] {prev['date_str']} {prev['order_no']} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
     log(f"[本次共更新] {len(targets)} 筆未處理訂單")
 
     prev_form = parse_edit_page(session, prev["edit_url"], phone)
@@ -839,7 +848,7 @@ def process_single_case(session, order, name, phone, addr, date, log):
     fail_list = []
 
     for t in targets:
-        log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['purchase_status_name']} {t['status']} {t['address']}")
+        log(f"👉 寫入 {t['date_str']} {t['order_no']} {t['purchase_status_name']} {t['status']} {t['address']}")
         try:
             target_form = parse_edit_page(session, t["edit_url"], phone)
             submit_update(session, target_form, phone, prev_notice)
@@ -1077,7 +1086,7 @@ def main_by_phone(phone, ui_logger=None):
 
     log("\n[列表頁候選]")
     for i in items:
-        log(f"{i['order_no']} {i['date_str']} {i['purchase_status_name']} {i['status']} {i['address']}")
+        log(f"{i['date_str']} {i['order_no']} {i['purchase_status_name']} {i['status']} {i['address']}")
 
     groups = find_phone_mode_targets(items)
     if not groups:
@@ -1095,8 +1104,8 @@ def main_by_phone(phone, ui_logger=None):
         prev = group["prev"]
 
         log(f"\n===== 處理第 {idx} 組 =====")
-        log(f"[目標單] {target['order_no']} {target['date_str']} {target['purchase_status_name']} {target['status']} {target['address']}")
-        log(f"[上一筆] {prev['order_no']} {prev['date_str']} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
+        log(f"[目標單] {target['date_str']} {target['order_no']} {target['purchase_status_name']} {target['status']} {target['address']}")
+        log(f"[上一筆] {prev['date_str']} {prev['order_no']} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
 
         try:
             prev_form = parse_edit_page(session, prev["edit_url"], phone)
@@ -1119,7 +1128,7 @@ def main_by_phone(phone, ui_logger=None):
             group_fail = []
 
             for t in same_address_unprocessed:
-                log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['purchase_status_name']} {t['status']} {t['address']}")
+                log(f"👉 寫入 {t['date_str']} {t['order_no']} {t['purchase_status_name']} {t['status']} {t['address']}")
                 tf = parse_edit_page(session, t["edit_url"], phone)
                 submit_update(session, tf, phone, prev_notice)
                 time.sleep(SLEEP_SECONDS)
@@ -1215,13 +1224,13 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
 
     log("\n[搜尋結果]")
     for i in all_targets:
-        log(f"{i['order_no']} {i['date_str']} {i['purchase_status_name']} {i['status']} {i['address']}")
+        log(f"{i['date_str']} {i['order_no']} {i['purchase_status_name']} {i['status']} {i['address']}")
 
     for idx, target in enumerate(all_targets, start=1):
         try:
             CURRENT_ROW_LOGS.append("")
             log(f"\n===== 處理第 {idx} 筆 =====")
-            log(f"[目標單] {target['order_no']} {target['date_str']} {target['purchase_status_name']} {target['status']} {target['address']}")
+            log(f"[目標單] {target['date_str']} {target['order_no']} {target['purchase_status_name']} {target['status']} {target['address']}")
 
             target_form = parse_edit_page(session, target["edit_url"], target.get("phone", ""))
 
@@ -1242,7 +1251,7 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
 
             log("\n[列表頁候選]")
             for i in items:
-                log(f"{i['order_no']} {i['date_str']} {i['purchase_status_name']} {i['status']} {i['address']}")
+                log(f"{i['date_str']} {i['order_no']} {i['purchase_status_name']} {i['status']} {i['address']}")
 
             prev = find_previous_processed(
                 target["order_no"],
@@ -1254,7 +1263,7 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
             if not prev:
                 raise RuntimeError("沒有上一筆已付款且相同電話地址的訂單")
 
-            log(f"\n[上一筆] {prev['order_no']} {prev['date_str']} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
+            log(f"\n[上一筆] {prev['date_str']} {prev['order_no']} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
 
             prev_form = parse_edit_page(session, prev["edit_url"], target_phone)
             prev_notice = str(prev_form.get("notice", "")).strip()
@@ -1268,7 +1277,7 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
             group_fail = []
 
             for t in same_address_unprocessed:
-                log(f"👉 寫入 {t['order_no']} {t['date_str']} {t['purchase_status_name']} {t['status']} {t['address']}")
+                log(f"👉 寫入 {t['date_str']} {t['order_no']} {t['purchase_status_name']} {t['status']} {t['address']}")
                 tf = parse_edit_page(session, t["edit_url"], target_phone)
                 submit_update(session, tf, target_phone, prev_notice)
                 time.sleep(SLEEP_SECONDS)
