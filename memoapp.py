@@ -1,333 +1,206 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import memo
-from datetime import date
 
 st.set_page_config(page_title="Memo 自動回填系統", layout="wide")
 
+# ================== STYLE ==================
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'DM Sans', 'Noto Sans TC', sans-serif;
-}
-
-/* 再縮上方與區塊間距 */
 .block-container {
-    padding-top: 0.8rem !important;
-    padding-bottom: 0.8rem !important;
-    max-width: 1200px !important;
-}
-[data-testid="stVerticalBlock"] > div {
-    gap: 0.2rem !important;
+    padding-top: 0.35rem !important;
+    padding-bottom: 0.5rem !important;
+    max-width: 1100px !important;
 }
 
+/* 標題 */
 h1 {
     font-size: 18px !important;
-    font-weight: 600 !important;
-    margin: 0 0 8px 0 !important;
-}
-h3 {
-    font-size: 11px !important;
-    font-weight: 500 !important;
-    color: #8a8f98 !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
-    margin: 8px 0 2px 0 !important;
-}
-hr {
-    border-color: rgba(0,0,0,0.08) !important;
-    margin: 6px 0 !important;
+    margin-bottom: 6px !important;
 }
 
-[data-testid="stRadio"] {
-    margin-bottom: 0 !important;
-}
-[data-testid="stRadio"] > div {
-    gap: 0.4rem !important;
-    margin-top: 0 !important;
-}
-[data-testid="stRadio"] label {
-    font-size: 13px !important;
-}
-
+/* input */
 [data-testid="stTextInput"],
 [data-testid="stNumberInput"],
 [data-testid="stDateInput"],
 [data-testid="stSelectbox"] {
     margin-bottom: 0 !important;
 }
-[data-testid="stTextInput"] label,
-[data-testid="stNumberInput"] label,
-[data-testid="stDateInput"] label,
-[data-testid="stSelectbox"] label {
-    font-size: 12px !important;
-    margin-bottom: 2px !important;
-    color: #666 !important;
-}
+
 [data-testid="stTextInput"] input,
 [data-testid="stNumberInput"] input,
 [data-testid="stDateInput"] input {
     font-size: 13px !important;
-    padding: 6px 9px !important;
-    border-radius: 8px !important;
+    padding: 6px 8px !important;
 }
 
-[data-testid="stCheckbox"] {
-    margin-top: 0.25rem !important;
-    margin-bottom: 0 !important;
-}
-
+/* button */
 [data-testid="stButton"] > button {
-    background: #16181d !important;
-    color: #fff !important;
-    border: none !important;
-    border-radius: 9px !important;
-    font-size: 14px !important;
-    font-weight: 500 !important;
-    padding: 9px 0 !important;
-}
-[data-testid="stButton"] > button:hover {
-    background: #2a2d33 !important;
+    background: #111 !important;
+    color: white !important;
+    border-radius: 6px !important;
+    padding: 8px 0 !important;
 }
 
+/* log */
 [data-testid="stCode"] {
     font-size: 12px !important;
-    border-radius: 10px !important;
-    max-height: 320px;
-    overflow-y: auto;
-    margin-top: 4px !important;
-}
-
-[data-testid="stMetric"] {
-    background: #f8f9fb !important;
-    border: 1px solid #e8ebf0 !important;
-    border-radius: 10px !important;
-    padding: 10px 12px !important;
-}
-[data-testid="stMetricLabel"] {
-    font-size: 12px !important;
-    color: #8a8f98 !important;
-}
-[data-testid="stMetricValue"] {
-    font-size: 22px !important;
-    font-weight: 600 !important;
-}
-
-[data-testid="stAlert"] {
-    border-radius: 10px !important;
-    margin-top: 8px !important;
+    max-height: 280px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-DEFAULT_RESULT = {
-    "processed": 0,
-    "success": 0,
-    "failed": 0,
-    "skipped": 0,
-    "updated_orders": 0,
-    "errors": [],
-}
-
+# ================== STATE ==================
 if "logs" not in st.session_state:
     st.session_state.logs = []
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-if "ran" not in st.session_state:
-    st.session_state.ran = False
+if "result" not in st.session_state:
+    st.session_state.result = None
 
+def ui_log(msg):
+    st.session_state.logs.append(str(msg))
 
-def normalize_result(r):
-    base = DEFAULT_RESULT.copy()
-    if isinstance(r, dict):
-        base.update(r)
-    if not isinstance(base.get("errors"), list):
-        base["errors"] = []
-    return base
-
-
-def reset_run_state():
-    st.session_state.logs = []
-    st.session_state.last_result = None
-    st.session_state.ran = False
-
-
+# ================== TITLE ==================
 st.title("📋 Memo 自動回填系統")
-st.markdown("<hr>", unsafe_allow_html=True)
 
-st.subheader("環境")
-env_option = st.radio("環境", ["prod", "dev"], horizontal=True, index=0, label_visibility="collapsed")
+# ================== ENV（縮小）==================
+col_env1, col_env2 = st.columns([1, 6])
+with col_env1:
+    env_option = st.selectbox(
+        "",
+        ["prod", "dev"],
+        index=0,
+        label_visibility="collapsed"
+    )
+
 memo.set_env(env_option)
-st.caption(f"目前環境：{env_option} | {getattr(memo, 'BASE_URL', '')}")
 
-st.markdown("<hr>", unsafe_allow_html=True)
+# ================== LOGIN ==================
+st.markdown("---")
 
-st.subheader("登入帳密")
-c1, c2 = st.columns(2)
-with c1:
-    email = st.text_input("Email", key="login_email")
-with c2:
-    password = st.text_input("Password", type="password", key="login_password")
+col1, col2 = st.columns(2)
+with col1:
+    email = st.text_input("Email")
+with col2:
+    password = st.text_input("Password", type="password")
 
 memo.set_runtime_credentials(email, password)
 
-st.markdown("<hr>", unsafe_allow_html=True)
+# ================== MODE ==================
+st.markdown("---")
 
-st.subheader("處理模式")
 mode = st.radio(
-    "mode",
-    ["By Google Sheet 列號", "By 電話", "By 搜尋條件"],
-    horizontal=True,
-    label_visibility="collapsed",
+    "",
+    ["By Google Sheet", "By 電話", "By 搜尋條件"],
+    horizontal=True
 )
 
 row_spec = ""
 phone = ""
-force = False
-
-date_field = "服務日期"
-date_start_text = ""
-date_end_text = ""
-date_start_picker = None
-date_end_picker = None
-purchase_status_name = "已付款"
 limit = 5
+date_mode = "服務日期"
+purchase_status_name = "已付款"
+start_date = None
+end_date = None
 
-if mode == "By Google Sheet 列號":
-    c1, c2 = st.columns([4, 1])
-    with c1:
-        row_spec = st.text_input("列號（例：2,3,5-8）", "2,3,5-8")
-    with c2:
-        st.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
-        force = st.checkbox("強制重跑", value=False)
+# ================== INPUT ==================
+if mode == "By Google Sheet":
+    row_spec = st.text_input("列號（例：2,3,5-8）")
 
 elif mode == "By 電話":
-    phone = st.text_input("電話號碼")
+    phone = st.text_input("電話")
 
 else:
-    c1, c2, c3 = st.columns([1.2, 1.2, 1])
-    with c1:
-        date_field = st.selectbox("日期條件", ["服務日期", "購買日期"], index=0)
-    with c2:
-        purchase_status_name = st.selectbox("付款狀態", ["已付款", "未付款"], index=0)
-    with c3:
-        limit = st.number_input("處理筆數", min_value=1, max_value=100, value=5)
+    col1, col2, col3 = st.columns([1.2, 1.2, 1])
+    with col1:
+        date_mode = st.selectbox("日期條件", ["服務日期", "購買日期"])
+    with col2:
+        purchase_status_name = st.selectbox("付款狀態", ["未付款", "已付款"])
+    with col3:
+        limit = st.number_input("處理筆數", min_value=1, value=5)
 
-    c4, c5 = st.columns(2)
-    with c4:
-        date_start_text = st.text_input("起日（可手打 YYYY/MM/DD）", "")
-        date_start_picker = st.date_input("或用日曆選起日", value=None)
-    with c5:
-        date_end_text = st.text_input("迄日（可手打 YYYY/MM/DD）", "")
-        date_end_picker = st.date_input("或用日曆選迄日", value=None)
+    col4, col5 = st.columns(2)
+    with col4:
+        start_date = st.date_input("開始日期", value=None)
+    with col5:
+        end_date = st.date_input("結束日期", value=None)
 
-    st.caption("搜尋條件：可選服務日期或購買日期區間，再搭配付款狀態與處理筆數。")
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
+# ================== RUN ==================
+st.markdown("---")
 run = st.button("🚀 執行", use_container_width=True)
 
+# ================== LOG ==================
 st.subheader("執行過程")
-log_placeholder = st.empty()
 
+log_box = st.empty()
 
-def render_logs():
-    text = "\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行"
-    log_placeholder.code(text)
+def render_log():
+    txt = "\n".join(st.session_state.logs[-2000:]) if st.session_state.logs else "尚未執行"
+    log_box.code(txt)
 
+render_log()
 
-def ui_log(msg: str):
-    st.session_state.logs.append(str(msg))
-    log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
+# ================== RESULT ==================
+result_box = st.empty()
 
+def render_result(r):
+    if not r:
+        return
 
-render_logs()
-
-result_area = st.empty()
-
-
-def render_result(result):
-    r = normalize_result(result)
-
-    with result_area.container():
-        st.markdown("<hr>", unsafe_allow_html=True)
+    with result_box.container():
+        st.markdown("---")
         st.subheader("執行結果")
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("執行筆數", r["processed"])
-        m2.metric("成功", r["success"])
-        m3.metric("失敗", r["failed"])
-        m4.metric("略過", r["skipped"])
-        m5.metric("回寫筆數", r["updated_orders"])
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("執行筆數", r.get("processed", 0))
+        c2.metric("成功", r.get("success", 0))
+        c3.metric("失敗", r.get("failed", 0))
+        c4.metric("略過", r.get("skipped", 0))
+        c5.metric("回寫筆數", r.get("updated_orders", 0))
 
-        if r["failed"] == 0 and r["processed"] > 0:
-            st.success(f"✅ 全部執行完成，共處理 {r['processed']} 筆，成功 {r['success']} 筆。")
-        elif r["failed"] > 0:
-            st.warning(f"⚠️ 執行完成，但有 {r['failed']} 筆失敗，請查看下方錯誤明細。")
-        else:
-            st.info("執行完成，無資料被處理。")
-
-        if r["errors"]:
+        if r.get("errors"):
             st.subheader("錯誤明細")
-            for err in r["errors"]:
-                st.error(err)
+            for e in r["errors"]:
+                st.error(e)
 
-
-if st.session_state.ran and st.session_state.last_result:
-    render_result(st.session_state.last_result)
-
+# ================== EXECUTE ==================
 if run:
-    reset_run_state()
-    result_area.empty()
-    render_logs()
+    st.session_state.logs = []
+    result_box.empty()
 
     if not email or not password:
-        result = {**DEFAULT_RESULT, "failed": 1, "errors": ["請先輸入 Email / Password"]}
-        st.session_state.last_result = result
-        st.session_state.ran = True
-        render_result(result)
+        ui_log("❌ 請輸入帳密")
+        render_log()
         st.stop()
 
     try:
         ui_log("===== 開始執行 =====")
 
-        if mode == "By Google Sheet 列號":
-            result = memo.main(
-                row_spec=row_spec,
-                force=force,
-                ui_logger=ui_log,
-            )
+        if mode == "By Google Sheet":
+            result = memo.main(row_spec=row_spec, ui_logger=ui_log)
 
         elif mode == "By 電話":
-            result = memo.main_by_phone(
-                phone=phone,
-                ui_logger=ui_log,
-            )
+            result = memo.main_by_phone(phone=phone, ui_logger=ui_log)
 
         else:
-            start_date = date_start_text.strip() or (date_start_picker.strftime("%Y/%m/%d") if date_start_picker else "")
-            end_date = date_end_text.strip() or (date_end_picker.strftime("%Y/%m/%d") if date_end_picker else "")
+            start_text = start_date.strftime("%Y/%m/%d") if start_date else ""
+            end_text = end_date.strftime("%Y/%m/%d") if end_date else ""
 
             result = memo.main_by_conditions(
-                date_mode=date_field,
-                date_start=start_date,
-                date_end=end_date,
+                date_mode=date_mode,
+                date_start=start_text,
+                date_end=end_text,
                 purchase_status_name=purchase_status_name,
                 limit=int(limit),
                 ui_logger=ui_log,
             )
 
         ui_log("===== 執行完成 =====")
-        st.session_state.last_result = result
-        st.session_state.ran = True
+
+        st.session_state.result = result
+
+        render_log()
         render_result(result)
 
     except Exception as e:
-        err = f"執行失敗：{e}"
-        ui_log(err)
-        result = {**DEFAULT_RESULT, "failed": 1, "errors": [str(e)]}
-        st.session_state.last_result = result
-        st.session_state.ran = True
-        render_result(result)
+        ui_log(f"❌ 執行錯誤: {e}")
+        render_log()
