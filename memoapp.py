@@ -1,64 +1,78 @@
-from flask import Flask, request, render_template_string
+import streamlit as st
 import requests
-from memo import login, process_order
+import memo
 
-app = Flask(__name__)
+st.set_page_config(layout="wide")
 
+st.title("📋 Memo 自動回填系統")
 
-HTML = """
-<h2>Memo 系統</h2>
+# ========================
+# 初始化
+# ========================
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
-<form method="post">
-Email: <input name="email"><br>
-Password: <input name="password"><br><br>
+def log(msg):
+    st.session_state.logs.append(msg)
+    st.code("\n".join(st.session_state.logs))
 
-訂單編號: <input name="order"><br><br>
+# ========================
+# UI
+# ========================
+email = st.text_input("Email")
+password = st.text_input("Password", type="password")
 
-<button type="submit">🚀 執行</button>
-</form>
+mode = st.radio("模式", ["單筆訂單", "電話批次"])
 
-<hr>
+order_no = ""
+phone = ""
 
-<h3>執行過程</h3>
-<pre>{{log}}</pre>
+if mode == "單筆訂單":
+    order_no = st.text_input("訂單編號")
 
-<h3>結果</h3>
-{{result}}
-"""
+if mode == "電話批次":
+    phone = st.text_input("電話")
 
+run = st.button("🚀 執行")
 
-@app.route("/", methods=["GET", "POST"])
-def index():
+# ========================
+# 執行
+# ========================
+if run:
 
-    log_lines = []
-    def log(x):
-        log_lines.append(x)
+    st.session_state.logs = []
 
-    result = ""
+    session = requests.Session()
 
-    if request.method == "POST":
-
-        session = requests.Session()
-
-        email = request.form["email"]
-        password = request.form["password"]
-        order = request.form["order"]
-
-        login(session, email, password)
-
+    try:
+        memo.login(session, email, password)
         log("[登入] 成功")
 
-        count, ok = process_order(session, order, log)
+        if mode == "單筆訂單":
 
-        if ok:
-            result = f"✅ 成功：回寫 {count} 筆"
-        else:
-            result = "❌ 失敗"
+            count, ok = memo.process_order(session, order_no, log)
 
-    return render_template_string(HTML,
-                                  log="\n".join(log_lines),
-                                  result=result)
+            if ok:
+                st.success(f"✅ 成功：回寫 {count} 筆")
+            else:
+                st.error("❌ 失敗")
 
+        elif mode == "電話批次":
 
-if __name__ == "__main__":
-    app.run(debug=True)
+            items = memo.parse_list(
+                session.get(f"{memo.BASE_URL}/purchase?phone={phone}&purchase_status=1").text
+            )
+
+            total = 0
+            success = 0
+
+            for i in items:
+                c, ok = memo.process_order(session, i["order_no"], log)
+                total += c
+                if ok:
+                    success += 1
+
+            st.success(f"完成：成功 {success} / 共 {len(items)} 筆")
+
+    except Exception as e:
+        st.error(f"❌ 錯誤：{e}")
