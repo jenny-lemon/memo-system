@@ -31,63 +31,6 @@ def reset_run_state():
 
 
 # ========================
-# Log UI
-# ========================
-st.subheader("4. 執行過程")
-log_placeholder = st.empty()
-
-
-def render_logs():
-    if st.session_state.logs:
-        log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
-    else:
-        log_placeholder.code("尚未執行")
-
-
-def ui_log(msg: str):
-    st.session_state.logs.append(str(msg))
-    log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
-
-
-# ========================
-# Result UI
-# ========================
-metrics_placeholder = st.empty()
-errors_placeholder = st.empty()
-
-
-def normalize_result(result):
-    base = DEFAULT_RESULT.copy()
-    if isinstance(result, dict):
-        base.update(result)
-    if "updated_orders" not in base:
-        base["updated_orders"] = 0
-    if "errors" not in base or base["errors"] is None:
-        base["errors"] = []
-    return base
-
-
-def render_result():
-    last = normalize_result(st.session_state.last_result)
-
-    st.subheader("5. 執行結果")
-    with metrics_placeholder.container():
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("執行筆數", last.get("processed", 0))
-        c2.metric("成功", last.get("success", 0))
-        c3.metric("失敗", last.get("failed", 0))
-        c4.metric("略過", last.get("skipped", 0))
-        c5.metric("回寫筆數", last.get("updated_orders", 0))
-
-    with errors_placeholder.container():
-        errors = last.get("errors", [])
-        if errors:
-            st.subheader("6. 錯誤明細")
-            for err in errors:
-                st.error(err)
-
-
-# ========================
 # Environment
 # ========================
 st.subheader("1. 選擇環境")
@@ -104,7 +47,7 @@ if hasattr(memo, "set_env"):
 
 base_url = getattr(memo, "BASE_URL", "")
 if base_url:
-    st.caption(f"目前環境：{env_option}｜{base_url}")
+    st.caption(f"目前環境：{env_option} | {base_url}")
 else:
     st.caption(f"目前環境：{env_option}")
 
@@ -117,11 +60,9 @@ st.subheader("2. 登入帳密")
 email = st.text_input("Email", value="", key="login_email")
 password = st.text_input("Password", value="", type="password", key="login_password")
 
-# 相容新版 memo.py
 if hasattr(memo, "set_runtime_credentials"):
     memo.set_runtime_credentials(email, password)
 else:
-    # 相容舊版 memo.py：直接塞模組屬性
     setattr(memo, "RUNTIME_EMAIL", email)
     setattr(memo, "RUNTIME_PASSWORD", password)
 
@@ -164,7 +105,65 @@ elif mode == "By 搜尋條件":
 
 run = st.button("🚀 執行", use_container_width=True)
 
+# ========================
+# Execution logs
+# ========================
+st.subheader("4. 執行過程")
+log_placeholder = st.empty()
+
+
+def render_logs():
+    if st.session_state.logs:
+        log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
+    else:
+        log_placeholder.code("尚未執行")
+
+
+def ui_log(msg: str):
+    st.session_state.logs.append(str(msg))
+    log_placeholder.code("\n".join(st.session_state.logs[-3000:]))
+
+
 render_logs()
+
+# ========================
+# Result UI
+# ========================
+metrics_placeholder = st.empty()
+errors_placeholder = st.empty()
+
+
+def normalize_result(result):
+    base = DEFAULT_RESULT.copy()
+    if isinstance(result, dict):
+        base.update(result)
+    if "updated_orders" not in base:
+        base["updated_orders"] = 0
+    if "errors" not in base or base["errors"] is None:
+        base["errors"] = []
+    return base
+
+
+def render_result():
+    last = normalize_result(st.session_state.last_result)
+
+    st.subheader("5. 執行結果")
+    with metrics_placeholder.container():
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("執行筆數", last.get("processed", 0))
+        c2.metric("成功", last.get("success", 0))
+        c3.metric("失敗", last.get("failed", 0))
+        c4.metric("略過", last.get("skipped", 0))
+        c5.metric("回寫筆數", last.get("updated_orders", 0))
+
+    with errors_placeholder.container():
+        errors = last.get("errors", [])
+        if errors:
+            st.subheader("6. 錯誤明細")
+            for err in errors:
+                st.error(err)
+
+
 render_result()
 
 # ========================
