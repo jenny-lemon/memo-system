@@ -7,14 +7,14 @@ st.set_page_config(page_title="Memo 自動回填系統", layout="wide")
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 0.35rem !important;
-    padding-bottom: 0.5rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.75rem !important;
     max-width: 1180px !important;
 }
 
 h1 {
-    font-size: 20px !important;
-    margin-bottom: 6px !important;
+    font-size: 22px !important;
+    margin-bottom: 8px !important;
 }
 
 [data-testid="stTextInput"],
@@ -28,7 +28,8 @@ h1 {
     background: #111 !important;
     color: white !important;
     border-radius: 8px !important;
-    padding: 8px 0 !important;
+    padding: 9px 0 !important;
+    font-weight: 600 !important;
 }
 
 [data-testid="stCode"] {
@@ -40,8 +41,12 @@ h1 {
 [data-testid="stMetric"] {
     background: #f8f9fb !important;
     border: 1px solid #eaecf0 !important;
-    border-radius: 9px !important;
+    border-radius: 12px !important;
     padding: 12px 14px !important;
+}
+
+.result-block {
+    padding-top: 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -59,6 +64,8 @@ if "logs" not in st.session_state:
     st.session_state.logs = []
 if "result" not in st.session_state:
     st.session_state.result = None
+if "is_running" not in st.session_state:
+    st.session_state.is_running = False
 
 
 def normalize_result(r):
@@ -70,7 +77,7 @@ def normalize_result(r):
     return base
 
 
-def reset_state():
+def clear_execution_state():
     st.session_state.logs = []
     st.session_state.result = None
 
@@ -80,26 +87,59 @@ def ui_log(msg):
     log_box.code("\n".join(st.session_state.logs[-3000:]))
 
 
+def render_result(result):
+    r = normalize_result(result)
+
+    with result_container:
+        st.markdown('<div class="result-block">', unsafe_allow_html=True)
+        st.subheader("執行結果")
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("執行筆數", r["processed"])
+        c2.metric("成功", r["success"])
+        c3.metric("失敗", r["failed"])
+        c4.metric("略過", r["skipped"])
+        c5.metric("回寫筆數", r["updated_orders"])
+
+        if r["errors"]:
+            with st.expander(f"錯誤明細（{len(r['errors'])}）", expanded=True):
+                for idx, err in enumerate(r["errors"], start=1):
+                    st.markdown(f"**{idx}.** {err}")
+        else:
+            st.success("本次沒有錯誤")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
 st.title("📋 Memo 自動回填系統")
 
-env_col1, env_col2 = st.columns([1, 8])
-with env_col1:
-    env_option = st.selectbox("", ["prod", "dev"], index=0, label_visibility="collapsed")
+# ===== 帳密 + 環境 =====
+top1, top2, top3 = st.columns([3.2, 3.2, 1.2])
 
-memo.set_env(env_option)
-
-st.markdown("---")
-
-c1, c2 = st.columns(2)
-with c1:
+with top1:
     email = st.text_input("Email")
-with c2:
+
+with top2:
     password = st.text_input("Password", type="password")
 
+with top3:
+    try:
+        env_option = st.segmented_control(
+            "環境",
+            options=["prod", "dev"],
+            default="prod",
+            selection_mode="single",
+        )
+        env_option = env_option or "prod"
+    except Exception:
+        env_option = st.selectbox("環境", ["prod", "dev"], index=0)
+
+memo.set_env(env_option)
 memo.set_runtime_credentials(email, password)
 
 st.markdown("---")
 
+# ===== 模式 =====
 mode = st.radio("", ["By Google Sheet", "By 電話", "By 搜尋條件"], horizontal=True)
 
 row_spec = ""
@@ -136,79 +176,87 @@ else:
     with c5:
         end_date = st.date_input("結束日期", value=None)
 
-run = st.button("🚀 執行", use_container_width=True)
+run = st.button(
+    "🚀 執行",
+    use_container_width=True,
+    disabled=st.session_state.is_running,
+)
 
+# ===== 執行過程 =====
 st.markdown("---")
-st.subheader("執行過程")
-log_box = st.empty()
-if st.session_state.logs:
-    log_box.code("\n".join(st.session_state.logs[-3000:]))
-else:
-    log_box.code("尚未執行")
+with st.expander("執行過程", expanded=True):
+    log_box = st.empty()
+    if st.session_state.logs:
+        log_box.code("\n".join(st.session_state.logs[-3000:]))
+    else:
+        log_box.code("尚未執行")
 
+# ===== 執行結果 =====
 st.markdown("---")
 result_container = st.container()
 
-
-def render_result(result):
-    r = normalize_result(result)
-    with result_container:
-        st.subheader("執行結果")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("執行筆數", r["processed"])
-        c2.metric("成功", r["success"])
-        c3.metric("失敗", r["failed"])
-        c4.metric("略過", r["skipped"])
-        c5.metric("回寫筆數", r["updated_orders"])
-
-        if r["errors"]:
-            with st.expander(f"錯誤明細（{len(r['errors'])}）", expanded=True):
-                for idx, err in enumerate(r["errors"], start=1):
-                    st.markdown(f"**{idx}.** {err}")
-        else:
-            st.success("本次沒有錯誤")
-
-
-if st.session_state.result:
+if st.session_state.result is not None:
     render_result(st.session_state.result)
 
 if run:
-    reset_state()
+    clear_execution_state()
     log_box.code("尚未執行")
     result_container.empty()
 
     if not email or not password:
-        st.session_state.result = {**DEFAULT_RESULT, "failed": 1, "errors": ["請先輸入 Email / Password"]}
+        st.session_state.result = {
+            **DEFAULT_RESULT,
+            "failed": 1,
+            "errors": ["請先輸入 Email / Password"],
+        }
         render_result(st.session_state.result)
         st.stop()
 
     try:
+        st.session_state.is_running = True
         ui_log("===== 開始執行 =====")
 
-        if mode == "By Google Sheet":
-            result = memo.main(row_spec=row_spec, force=force, ui_logger=ui_log)
+        with st.spinner("執行中..."):
+            if mode == "By Google Sheet":
+                result = memo.main(
+                    row_spec=row_spec,
+                    force=force,
+                    ui_logger=ui_log,
+                )
 
-        elif mode == "By 電話":
-            result = memo.main_by_phone(phone=phone, ui_logger=ui_log)
+            elif mode == "By 電話":
+                result = memo.main_by_phone(
+                    phone=phone,
+                    ui_logger=ui_log,
+                )
 
-        else:
-            start_text = start_date.strftime("%Y/%m/%d") if start_date else ""
-            end_text = end_date.strftime("%Y/%m/%d") if end_date else ""
+            else:
+                start_text = start_date.strftime("%Y/%m/%d") if start_date else ""
+                end_text = end_date.strftime("%Y/%m/%d") if end_date else ""
 
-            result = memo.main_by_conditions(
-                date_mode=date_mode,
-                date_start=start_text,
-                date_end=end_text,
-                purchase_status_name=purchase_status_name,
-                limit=int(limit),
-                ui_logger=ui_log,
-            )
+                result = memo.main_by_conditions(
+                    date_mode=date_mode,
+                    date_start=start_text,
+                    date_end=end_text,
+                    purchase_status_name=purchase_status_name,
+                    limit=int(limit),
+                    ui_logger=ui_log,
+                )
 
         ui_log("===== 執行完成 =====")
         st.session_state.result = result
+        result_container.empty()
         render_result(result)
 
     except Exception as e:
         ui_log(f"❌ 執行錯誤: {e}")
-        st.session_state.result = {**DEFAULT_RESULT, "failed": 1, "errors": [str(e)]}
+        st.session_state.result = {
+            **DEFAULT_RESULT,
+            "failed": 1,
+            "errors": [str(e)],
+        }
+        result_container.empty()
         render_result(st.session_state.result)
+
+    finally:
+        st.session_state.is_running = False
