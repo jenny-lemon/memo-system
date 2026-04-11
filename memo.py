@@ -1,61 +1,49 @@
+# -*- coding: utf-8 -*-
 import requests
 import re
 from datetime import datetime
 
 BASE_URL = "https://backend.lemonclean.com.tw"
 
+RUNTIME_EMAIL = ""
+RUNTIME_PASSWORD = ""
 
-# =========================
+
+# ========================
 # 工具
-# =========================
+# ========================
+def set_runtime_credentials(email, password):
+    global RUNTIME_EMAIL, RUNTIME_PASSWORD
+    RUNTIME_EMAIL = email
+    RUNTIME_PASSWORD = password
+
 
 def parse_date(s):
-    if not s:
-        return None
-    s = s.replace("-", "/")
     try:
-        return datetime.strptime(s, "%Y/%m/%d")
+        return datetime.strptime(s.replace("-", "/"), "%Y/%m/%d")
     except:
         return None
 
 
-def extract_service_date(text):
-    text = str(text or "")
-
-    m = re.search(r'(\d{4}[/-]\d{2}[/-]\d{2})\s*\([一二三四五六日]\)', text)
-    if m:
-        return m.group(1).replace("-", "/")
-
-    m = re.search(r'(\d{4}[/-]\d{2}[/-]\d{2})', text)
-    if m:
-        return m.group(1).replace("-", "/")
-
-    return ""
+def log_safe(log, msg):
+    if log:
+        log(msg)
 
 
-def normalize_address(addr):
-    if not addr:
-        return ""
-    return addr.replace("之一", "之1").replace("之二", "之2").strip()
-
-
-# =========================
+# ========================
 # 登入
-# =========================
-
-def login(session, email, password):
+# ========================
+def login(session):
     session.get(f"{BASE_URL}/login")
-    data = {
-        "email": email,
-        "password": password
-    }
-    session.post(f"{BASE_URL}/login", data=data)
+    session.post(f"{BASE_URL}/login", data={
+        "email": RUNTIME_EMAIL,
+        "password": RUNTIME_PASSWORD
+    })
 
 
-# =========================
-# 列表解析
-# =========================
-
+# ========================
+# 解析列表
+# ========================
 def parse_list(html):
     rows = []
     lines = html.splitlines()
@@ -66,135 +54,152 @@ def parse_list(html):
 
         order = re.search(r'(LC\d+)', line)
         date = re.search(r'(\d{4}/\d{2}/\d{2})', line)
-        phone = re.search(r'09\d{8}', line)
 
         if not order:
             continue
 
         rows.append({
             "order_no": order.group(1),
-            "raw_date": date.group(1) if date else "",
-            "phone": phone.group(0) if phone else "",
+            "date": date.group(1) if date else "",
             "line": line
         })
 
     return rows
 
 
-# =========================
+# ========================
 # 訂單詳情
-# =========================
-
-def get_order_detail(session, order_no):
+# ========================
+def get_detail(session, order_no):
     url = f"{BASE_URL}/purchase/edit/{order_no.replace('LC','')}"
     res = session.get(url)
     text = res.text
 
     phone = re.search(r'09\d{8}', text)
-    address = re.search(r'台[北中南].+?\d+樓', text)
+    address = re.search(r'台.+?\d+樓', text)
     name = re.search(r'客戶.*?>(.*?)<', text)
-
-    service_date = extract_service_date(text)
+    date = re.search(r'(\d{4}-\d{2}-\d{2})', text)
 
     return {
         "phone": phone.group(0) if phone else "",
-        "address": normalize_address(address.group(0) if address else ""),
+        "address": address.group(0) if address else "",
         "name": name.group(1) if name else "",
-        "service_date": service_date,
-        "service_date_obj": parse_date(service_date),
+        "date": date.group(1).replace("-", "/") if date else "",
+        "date_obj": parse_date(date.group(1)) if date else None,
         "html": text
     }
 
 
-# =========================
+# ========================
 # 找上一筆
-# =========================
-
+# ========================
 def find_previous(session, phone, address, current_date):
 
     url = f"{BASE_URL}/purchase?phone={phone}&purchase_status=1"
     res = session.get(url)
+
     items = parse_list(res.text)
 
-    candidates = []
+    best = None
 
     for i in items:
-        d = get_order_detail(session, i["order_no"])
+        d = get_detail(session, i["order_no"])
 
         if d["address"] != address:
             continue
 
-        if not d["service_date_obj"]:
+        if not d["date_obj"]:
             continue
 
-        if d["service_date_obj"] >= current_date:
+        if d["date_obj"] >= current_date:
             continue
 
-        # 必須已處理
         if "已處理" not in d["html"]:
             continue
 
-        candidates.append((i["order_no"], d))
+        if not best or d["date_obj"] > best["date_obj"]:
+            best = d
+            best["order_no"] = i["order_no"]
 
-    candidates.sort(key=lambda x: x[1]["service_date_obj"], reverse=True)
-
-    return candidates[0] if candidates else None
+    return best
 
 
-# =========================
+# ========================
 # 更新訂單
-# =========================
-
-def update_order(session, order_no, memo):
-
+# ========================
+def update(session, order_no, memo):
     url = f"{BASE_URL}/purchase?id={order_no.replace('LC','')}"
 
-    data = {
+    session.post(url, data={
         "progress_status": "1",
         "notice": memo
-    }
+    })
 
-    session.post(url, data=data)
-
-    # 驗證
     check = session.get(f"{BASE_URL}/purchase/edit/{order_no.replace('LC','')}").text
 
-    success = ("已處理" in check) and (memo[:10] in check)
-
-    return success
+    return ("已處理" in check) and (memo[:5] in check)
 
 
-# =========================
-# 主流程（單筆）
-# =========================
+# ========================
+# 單筆處理
+# ========================
+def process_one(session, order_no, log):
 
-def process_order(session, order_no, log):
+    d = get_detail(session, order_no)
 
-    d = get_order_detail(session, order_no)
+    log_safe(log, f"訂單: {order_no}")
+    log_safe(log, f"客戶: {d['name']}")
+    log_safe(log, f"電話: {d['phone']}")
+    log_safe(log, f"地址: {d['address']}")
+    log_safe(log, f"日期: {d['date']}")
 
-    log(f"訂單: {order_no}")
-    log(f"客戶: {d['name']}")
-    log(f"電話: {d['phone']}")
-    log(f"地址: {d['address']}")
-    log(f"日期: {d['service_date']}")
-
-    prev = find_previous(session, d["phone"], d["address"], d["service_date_obj"])
+    prev = find_previous(session, d["phone"], d["address"], d["date_obj"])
 
     if not prev:
-        log(f"❌ 處理失敗 {order_no}：沒有上一筆")
-        return 0, False
+        log_safe(log, f"❌ 沒有上一筆")
+        return False
 
-    prev_no, prev_data = prev
+    log_safe(log, f"[上一筆] {prev['date']} {prev['order_no']}")
 
-    log(f"[上一筆] {prev_data['service_date']} {prev_no}")
+    memo_text = f"沿用上一筆 {prev['order_no']}"
 
-    memo = "自動帶入：" + prev_data["name"]
+    ok = update(session, order_no, memo_text)
 
-    success = update_order(session, order_no, memo)
-
-    if success:
-        log(f"✅ 驗證成功 {order_no}")
-        return 1, True
+    if ok:
+        log_safe(log, f"✅ 成功 {order_no}")
     else:
-        log(f"❌ 驗證失敗 {order_no}")
-        return 0, False
+        log_safe(log, f"❌ 驗證失敗 {order_no}")
+
+    return ok
+
+
+# ========================
+# By 電話
+# ========================
+def main_by_phone(phone, ui_logger=None):
+
+    session = requests.Session()
+    login(session)
+
+    html = session.get(f"{BASE_URL}/purchase?phone={phone}&purchase_status=1").text
+    items = parse_list(html)
+
+    success = 0
+
+    for i in items:
+        ok = process_one(session, i["order_no"], ui_logger)
+        if ok:
+            success += 1
+
+    return {
+        "processed": len(items),
+        "success": success,
+        "failed": len(items) - success,
+        "updated_orders": success
+    }
+
+
+# ========================
+# ⭐ By 搜尋條件（你缺的）
+# ========================
+def main_by_conditions(date_s, limit=
