@@ -18,9 +18,6 @@ except Exception:
     st = None
 
 
-# ========================
-# ENV
-# ========================
 ENV_NAME = getattr(env, "ENV", "prod").lower()
 BASE_URL_DEV = getattr(env, "BASE_URL_DEV", "https://backend-dev.lemonclean.com.tw")
 BASE_URL_PROD = getattr(env, "BASE_URL_PROD", "https://backend.lemonclean.com.tw")
@@ -41,9 +38,6 @@ def set_env(env_name: str):
 
 set_env(ENV_NAME)
 
-# ========================
-# Runtime credentials
-# ========================
 RUNTIME_EMAIL = ""
 RUNTIME_PASSWORD = ""
 
@@ -54,9 +48,6 @@ def set_runtime_credentials(email: str, password: str):
     RUNTIME_PASSWORD = (password or "").strip()
 
 
-# ========================
-# Settings
-# ========================
 WORKSHEET_NAME = getattr(env, "WORKSHEET_NAME", "memo")
 LOG_SHEET_NAME = getattr(env, "LOG_SHEET_NAME", "memo_log")
 GOOGLE_SERVICE_ACCOUNT_FILE = getattr(env, "GOOGLE_SERVICE_ACCOUNT_FILE", "")
@@ -69,9 +60,6 @@ RETRY_BACKOFF = 1.2
 CURRENT_ROW_LOGS: List[str] = []
 
 
-# ========================
-# Logger
-# ========================
 def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
     def _log(msg: str):
         msg = str(msg)
@@ -82,9 +70,6 @@ def make_logger(ui_logger: Optional[Callable[[str], None]] = None):
     return _log
 
 
-# ========================
-# Helpers
-# ========================
 def blank_result():
     return {
         "processed": 0,
@@ -126,7 +111,6 @@ def normalize_text(t: str) -> str:
 
 
 def normalize_address(addr: str) -> str:
-    # 地址必須完全相同，只去空白
     return normalize_text(addr)
 
 
@@ -148,7 +132,6 @@ def safe_cell(row: List[str], idx_1_based: int) -> str:
 def parse_date(t: str):
     if not t:
         return None
-
     s = str(t).strip()
     for fmt in [
         "%Y/%m/%d",
@@ -162,7 +145,6 @@ def parse_date(t: str):
             return datetime.strptime(s, fmt)
         except Exception:
             pass
-
     m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", s)
     if m:
         y, mo, d = map(int, m.groups())
@@ -210,41 +192,32 @@ def extract_name_from_text_block(text: str) -> str:
 
 def extract_service_date_from_page_text(page_text: str) -> str:
     text = str(page_text or "")
-
-    # 先抓帶星期的服務日期，例如 2026-05-14(四)
     m = re.search(r"(\d{4}[/-]\d{2}[/-]\d{2})\s*\([一二三四五六日]\)", text)
     if m:
         return m.group(1).replace("-", "/")
-
-    # 再抓一般日期
     m = re.search(r"(\d{4}[/-]\d{2}[/-]\d{2})", text)
     if m:
         return m.group(1).replace("-", "/")
-
     return ""
 
 
 def extract_address_from_text_block(text: str) -> str:
     text = str(text or "")
-
     city_pattern = (
         r"(?:台北市|臺北市|新北市|桃園市|新竹市|新竹縣|台中市|臺中市|"
         r"彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|台南市|臺南市|高雄市|"
         r"屏東縣|宜蘭縣|花蓮縣|台東縣|臺東縣|基隆市)"
     )
-
     patterns = [
         rf"({city_pattern}[^\n]*?號(?:之\d+)?(?:\d+樓)?(?:之\d+)?(?:\d+室)?)",
         rf"({city_pattern}[^\n]*?樓之\d+)",
         rf"({city_pattern}[^\n]*?\d+樓)",
         rf"({city_pattern}[^\n]*?號)",
     ]
-
     for p in patterns:
         m = re.search(p, text)
         if m:
             return m.group(1).strip()
-
     return ""
 
 
@@ -257,15 +230,11 @@ def display_service_date(item: Dict) -> str:
     return item.get("service_date") or item.get("raw_date_str") or ""
 
 
-# ========================
-# Google Sheets
-# ========================
 def get_spreadsheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-
     if st is not None:
         try:
             creds = Credentials.from_service_account_info(
@@ -380,8 +349,8 @@ def apply_sheet_presentation(ws, updated_rows: List[int]):
             "range": {
                 "sheetId": sheet_id,
                 "startRowIndex": 1,
-                "startColumnIndex": 22,  # W
-                "endColumnIndex": 24,    # X 後一欄
+                "startColumnIndex": 22,
+                "endColumnIndex": 24,
             },
             "cell": {
                 "userEnteredFormat": {
@@ -396,9 +365,6 @@ def apply_sheet_presentation(ws, updated_rows: List[int]):
     with_retry(ws.spreadsheet.batch_update, {"requests": requests_body})
 
 
-# ========================
-# Backend login
-# ========================
 def login():
     email = RUNTIME_EMAIL
     password = RUNTIME_PASSWORD
@@ -443,9 +409,6 @@ def login():
     return s
 
 
-# ========================
-# List parsing
-# ========================
 def parse_purchase_row_text(txt: str) -> Dict:
     txt = str(txt or "")
 
@@ -454,7 +417,6 @@ def parse_purchase_row_text(txt: str) -> Dict:
     if order_m:
         order_no = order_m.group(1)
 
-    # 列表頁上的日期不可信，只先存 raw
     dates = re.findall(r"\d{4}-\d{2}-\d{2}", txt)
     raw_date_str = dates[0].replace("-", "/") if dates else ""
     raw_date_obj = parse_date(dates[0]) if dates else None
@@ -570,39 +532,54 @@ def search_paid_orders_by_phone(session, phone) -> List[Dict]:
     return parse_purchase_list_page(r.text)
 
 
-def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
-    r = session_get(
-        session,
-        PURCHASE_URL,
-        params={
-            "keyword": "",
-            "name": "",
-            "phone": "",
-            "orderNo": "",
-            "date_s": date_s.replace("/", "-"),
-            "date_e": date_s.replace("/", "-"),
-            "clean_date_s": "",
-            "clean_date_e": "",
-            "paid_at_s": "",
-            "paid_at_e": "",
-            "refundDateS": "",
-            "refundDateE": "",
-            "buy": "",
-            "area_id": "",
-            "isCharge": "",
-            "isRefund": "",
-            "payway": "",
-            "purchase_status": "1",
-            "progress_status": "0",
-            "invoiceStatus": "",
-            "otherFee": "",
-            "orderBy": "",
-        },
-    )
+def search_by_conditions(session, date_mode: str, date_start: str, date_end: str, purchase_status_name: str, limit: int) -> List[Dict]:
+    purchase_status_map = {
+        "未付款": "0",
+        "已付款": "1",
+    }
+
+    purchase_status = purchase_status_map.get(purchase_status_name, "1")
+
+    params = {
+        "keyword": "",
+        "name": "",
+        "phone": "",
+        "orderNo": "",
+        "date_s": "",
+        "date_e": "",
+        "clean_date_s": "",
+        "clean_date_e": "",
+        "paid_at_s": "",
+        "paid_at_e": "",
+        "refundDateS": "",
+        "refundDateE": "",
+        "buy": "",
+        "area_id": "",
+        "isCharge": "",
+        "isRefund": "",
+        "payway": "",
+        "purchase_status": purchase_status,
+        "progress_status": "0",
+        "invoiceStatus": "",
+        "otherFee": "",
+        "orderBy": "",
+    }
+
+    if date_mode == "服務日期":
+        params["clean_date_s"] = (date_start or "").replace("/", "-")
+        params["clean_date_e"] = (date_end or "").replace("/", "-")
+    else:
+        params["date_s"] = (date_start or "").replace("/", "-")
+        params["date_e"] = (date_end or "").replace("/", "-")
+
+    r = session_get(session, PURCHASE_URL, params=params)
     r.raise_for_status()
 
     items = parse_purchase_list_page(r.text)
-    filtered = [x for x in items if x.get("purchase_status") == "1" and x.get("status_code") == "0"]
+    filtered = [
+        x for x in items
+        if x.get("purchase_status") == purchase_status and x.get("status_code") == "0"
+    ]
 
     if limit and limit > 0:
         filtered = filtered[:limit]
@@ -610,9 +587,6 @@ def search_by_conditions(session, date_s: str, limit: int) -> List[Dict]:
     return filtered
 
 
-# ========================
-# Edit page parsing
-# ========================
 def parse_select_value(select_el):
     name = select_el.get("name", "")
     text = select_el.get_text(" ", strip=True)
@@ -724,7 +698,6 @@ def parse_edit_page(session, edit_url, phone=""):
 def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
     if item.get("service_date") and item.get("service_date_obj"):
         return item
-
     if not item.get("edit_url"):
         return item
 
@@ -750,42 +723,59 @@ def enrich_items_from_detail(session, items: List[Dict], phone="") -> List[Dict]
     return result
 
 
-# ========================
-# Previous / targets
-# ========================
 def item_service_date_obj(item: Dict):
     return item.get("service_date_obj") or item.get("raw_date_obj")
 
 
-def find_previous_processed(current_order_no, current_address, current_phone, current_service_date, items):
-    matched = []
+def find_previous_processed_verbose(current_order_no, current_address, current_phone, current_service_date, items):
+    same_phone = []
+    same_address_items = []
+    earlier_items = []
+    paid_items = []
+    processed_items = []
+
     for x in items:
         if x["order_no"] == current_order_no:
-            continue
-        if x.get("purchase_status") != "1":
-            continue
-        if x.get("status_code") not in ("1", "2"):
-            continue
-
-        dt = item_service_date_obj(x)
-        if not dt:
-            continue
-        if current_service_date and dt >= current_service_date:
-            continue
-
-        if not same_address(x.get("address", ""), current_address):
             continue
 
         if current_phone and x.get("phone") and normalize_phone(x["phone"]) != normalize_phone(current_phone):
             continue
+        same_phone.append(x)
 
-        matched.append(x)
+        if not same_address(x.get("address", ""), current_address):
+            continue
+        same_address_items.append(x)
 
-    if not matched:
-        return None
+        dt = item_service_date_obj(x)
+        if not dt:
+            continue
 
-    matched.sort(key=lambda k: item_service_date_obj(k), reverse=True)
-    return matched[0]
+        if current_service_date and dt >= current_service_date:
+            continue
+        earlier_items.append(x)
+
+        if x.get("purchase_status") != "1":
+            continue
+        paid_items.append(x)
+
+        if x.get("status_code") not in ("1", "2"):
+            continue
+        processed_items.append(x)
+
+    if processed_items:
+        processed_items.sort(key=lambda k: item_service_date_obj(k), reverse=True)
+        return processed_items[0], ""
+
+    if not same_phone:
+        return None, "沒有相同電話的歷史訂單"
+    if not same_address_items:
+        return None, "有相同電話，但沒有相同地址的歷史訂單"
+    if not earlier_items:
+        return None, "有相同電話地址的訂單，但沒有更早的服務日期"
+    if not paid_items:
+        return None, "有相同電話地址且更早的訂單，但付款狀態不是已付款"
+
+    return None, "有相同電話地址且已付款的更早訂單，但服務狀態不是已處理"
 
 
 def find_all_unprocessed_same_address(current_address, current_phone, items):
@@ -830,15 +820,11 @@ def find_phone_mode_targets(items):
     return groups
 
 
-# ========================
-# Submit / verify
-# ========================
 def submit_update(session, form_info, phone, new_notice):
     action = form_info["action"]
     fields = dict(form_info["fields"])
     query_params = dict(form_info.get("query_params", {}))
 
-    # notice
     if "notice" in fields:
         fields["notice"] = new_notice
     elif "purchase[notice]" in fields:
@@ -846,7 +832,6 @@ def submit_update(session, form_info, phone, new_notice):
     else:
         fields["notice"] = new_notice
 
-    # progress / progress_status
     updated_progress = False
     for key in ["progress", "progress_status", "purchase[progress]", "purchase[progress_status]"]:
         if key in fields:
@@ -855,7 +840,6 @@ def submit_update(session, form_info, phone, new_notice):
     if not updated_progress:
         fields["progress"] = "1"
 
-    # id
     if form_info.get("purchase_id") and "id" not in query_params:
         query_params["id"] = form_info["purchase_id"]
 
@@ -893,9 +877,6 @@ def verify_update(session, edit_url, phone, expected_notice):
     return notice_ok and progress_ok, form
 
 
-# ========================
-# Core single case
-# ========================
 def process_single_case(session, order, name, phone, addr, date, log):
     current_service_date = parse_date(date)
 
@@ -912,28 +893,30 @@ def process_single_case(session, order, name, phone, addr, date, log):
     for i in items:
         log(f"{display_service_date(i)} {i['order_no']} {i.get('name','')} {i['purchase_status_name']} {i['status']} {i['address']}")
 
-    prev = find_previous_processed(order, addr, phone, current_service_date, items)
+    prev, reason = find_previous_processed_verbose(order, addr, phone, current_service_date, items)
     if not prev:
-        log("❌ 沒有上一筆已付款且相同電話地址的訂單")
+        reason_text = f"❌ 處理失敗 {order}：{reason}"
+        log(reason_text)
         return {
             "ok": False,
             "prev_date": "",
             "prev_order": "",
             "prev_notice": "",
             "updated_orders": 0,
-            "error": "沒有上一筆已付款且相同電話地址的訂單",
+            "error": reason_text,
         }
 
     targets = find_all_unprocessed_same_address(addr, phone, items)
     if not targets:
-        log("❌ 沒有未處理目標單")
+        reason_text = f"❌ 處理失敗 {order}：沒有未處理目標單"
+        log(reason_text)
         return {
             "ok": False,
             "prev_date": display_service_date(prev),
             "prev_order": prev["order_no"],
             "prev_notice": "",
             "updated_orders": 0,
-            "error": "沒有未處理目標單",
+            "error": reason_text,
         }
 
     log(f"\n[上一筆] {display_service_date(prev)} {prev['order_no']} {prev.get('name','')} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
@@ -943,14 +926,15 @@ def process_single_case(session, order, name, phone, addr, date, log):
     prev_notice = str(prev_form.get("notice", "")).strip()
 
     if not prev_notice:
-        log("❌ 上一筆找不到客服備註")
+        reason_text = f"❌ 處理失敗 {order}：上一筆找不到客服備註"
+        log(reason_text)
         return {
             "ok": False,
             "prev_date": display_service_date(prev),
             "prev_order": prev["order_no"],
             "prev_notice": "",
             "updated_orders": 0,
-            "error": "上一筆找不到客服備註",
+            "error": reason_text,
         }
 
     success_count = 0
@@ -989,20 +973,18 @@ def process_single_case(session, order, name, phone, addr, date, log):
             "error": "",
         }
 
-    log(f"❌ 失敗：成功 {success_count} 筆，失敗 {len(fail_list)} 筆：{', '.join(fail_list)}")
+    reason_text = f"❌ 處理失敗 {order}：失敗目標 {', '.join(fail_list)}"
+    log(reason_text)
     return {
         "ok": False,
         "prev_date": display_service_date(prev),
         "prev_order": prev["order_no"],
         "prev_notice": prev_notice,
         "updated_orders": success_count,
-        "error": f"失敗目標：{', '.join(fail_list)}",
+        "error": reason_text,
     }
 
 
-# ========================
-# Sheet mode
-# ========================
 def main(row_spec="2", force=False, ui_logger=None):
     ws = get_ws()
     log_ws = get_log_ws()
@@ -1030,12 +1012,12 @@ def main(row_spec="2", force=False, ui_logger=None):
 
             row = rows[r - 1]
 
-            order = safe_cell(row, 2)   # B 訂單編號
-            date = safe_cell(row, 8)    # H 服務日期
-            name = safe_cell(row, 13)   # M 客戶姓名
-            addr = safe_cell(row, 14)   # N 地址
-            phone = safe_cell(row, 15)  # O 電話
-            v_status = safe_cell(row, 22)  # V 狀態
+            order = safe_cell(row, 2)
+            date = safe_cell(row, 8)
+            name = safe_cell(row, 13)
+            addr = safe_cell(row, 14)
+            phone = safe_cell(row, 15)
+            v_status = safe_cell(row, 22)
 
             log(f"\n===== 第{r}列 =====")
 
@@ -1050,9 +1032,10 @@ def main(row_spec="2", force=False, ui_logger=None):
                 continue
 
             if not order or not addr or not phone:
-                log("❌ 缺少訂單 / 地址 / 電話")
+                reason_text = f"❌ 處理失敗 第{r}列：缺少訂單 / 地址 / 電話"
+                log(reason_text)
                 result["failed"] += 1
-                result["errors"].append(f"第{r}列：缺少訂單 / 地址 / 電話")
+                result["errors"].append(reason_text)
                 continue
 
             if result["processed"] == 0:
@@ -1068,7 +1051,6 @@ def main(row_spec="2", force=False, ui_logger=None):
                 log=log,
             )
 
-            # S:T:U:V:W:X
             updates.append({
                 "range": f"S{r}:X{r}",
                 "values": [[
@@ -1107,10 +1089,11 @@ def main(row_spec="2", force=False, ui_logger=None):
                 result["success"] += 1
             else:
                 result["failed"] += 1
-                result["errors"].append(f"第{r}列：{single_result['error']}")
+                result["errors"].append(single_result["error"])
 
         except Exception as e:
-            log(f"❌ 例外錯誤：{e}")
+            reason_text = f"❌ 處理失敗 第{r}列：{e}"
+            log(reason_text)
             append_log_row(
                 log_ws=log_ws,
                 source_type="BY列號",
@@ -1125,11 +1108,11 @@ def main(row_spec="2", force=False, ui_logger=None):
                 prev_notice="",
                 updated_orders=0,
                 status="失敗",
-                error_msg=str(e),
+                error_msg=reason_text,
                 full_log="\n".join(CURRENT_ROW_LOGS),
             )
             result["failed"] += 1
-            result["errors"].append(f"第{r}列：{e}")
+            result["errors"].append(reason_text)
 
     if updates:
         with_retry(ws.batch_update, updates, value_input_option="RAW")
@@ -1138,9 +1121,6 @@ def main(row_spec="2", force=False, ui_logger=None):
     return result
 
 
-# ========================
-# Phone mode
-# ========================
 def main_by_phone(phone, ui_logger=None):
     CURRENT_ROW_LOGS.clear()
     log = make_logger(ui_logger)
@@ -1150,8 +1130,8 @@ def main_by_phone(phone, ui_logger=None):
     phone = normalize_phone(phone)
 
     if not phone:
-        msg = "電話號碼不可空白"
-        log(f"❌ {msg}")
+        msg = "❌ 處理失敗：電話號碼不可空白"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
         return result
@@ -1165,20 +1145,18 @@ def main_by_phone(phone, ui_logger=None):
         items = search_paid_orders_by_phone(session, phone)
         items = enrich_items_from_detail(session, items, phone)
     except Exception as e:
-        msg = f"登入/搜尋失敗：{e}"
-        log(f"❌ {msg}")
+        msg = f"❌ 處理失敗：登入/搜尋失敗：{e}"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
         return result
 
     if not items:
-        msg = "查無已付款訂單"
-        log(f"❌ {msg}")
+        msg = "❌ 處理失敗：查無已付款訂單"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
-        append_log_row(
-            log_ws, "BY電話", phone, phone, "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS)
-        )
+        append_log_row(log_ws, "BY電話", phone, phone, "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS))
         return result
 
     log("\n[列表頁候選]")
@@ -1187,13 +1165,11 @@ def main_by_phone(phone, ui_logger=None):
 
     groups = find_phone_mode_targets(items)
     if not groups:
-        msg = "找不到可處理的『未處理單 + 同地址前次已付款已處理單』"
-        log(f"❌ {msg}")
+        msg = "❌ 處理失敗：找不到可處理的『未處理單 + 同地址前次已付款已處理單』"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
-        append_log_row(
-            log_ws, "BY電話", phone, phone, "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS)
-        )
+        append_log_row(log_ws, "BY電話", phone, phone, "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS))
         return result
 
     for idx, group in enumerate(groups, start=1):
@@ -1210,11 +1186,13 @@ def main_by_phone(phone, ui_logger=None):
             target_name = target.get("name", "") or parse_edit_page(session, target["edit_url"], phone).get("customer_name", "")
 
             if not prev_notice:
-                log("❌ 上一筆找不到客服備註")
+                reason_text = f"❌ 處理失敗 {target['order_no']}：上一筆找不到客服備註"
+                log(reason_text)
                 result["failed"] += 1
+                result["errors"].append(reason_text)
                 append_log_row(
                     log_ws, "BY電話", phone, phone, target_name, target["address"], target["order_no"], display_service_date(target),
-                    prev["order_no"], display_service_date(prev), "", 0, "失敗", "上一筆找不到客服備註", "\n".join(CURRENT_ROW_LOGS)
+                    prev["order_no"], display_service_date(prev), "", 0, "失敗", reason_text, "\n".join(CURRENT_ROW_LOGS)
                 )
                 continue
 
@@ -1254,69 +1232,91 @@ def main_by_phone(phone, ui_logger=None):
                     group_ok, "成功", "", "\n".join(CURRENT_ROW_LOGS)
                 )
             else:
-                log(f"❌ 失敗：成功 {group_ok} 筆，失敗 {len(group_fail)} 筆：{', '.join(group_fail)}")
+                reason_text = f"❌ 處理失敗 {target['order_no']}：失敗目標 {', '.join(group_fail)}"
+                log(reason_text)
                 result["failed"] += 1
+                result["errors"].append(reason_text)
                 append_log_row(
                     log_ws, "BY電話", phone, phone, target_name, target["address"],
                     target["order_no"], display_service_date(target), prev["order_no"], display_service_date(prev), prev_notice,
-                    group_ok, "失敗", f"失敗目標：{', '.join(group_fail)}", "\n".join(CURRENT_ROW_LOGS)
+                    group_ok, "失敗", reason_text, "\n".join(CURRENT_ROW_LOGS)
                 )
 
         except Exception as e:
-            log(f"❌ 處理失敗 {target['order_no']}：{e}")
+            reason_text = f"❌ 處理失敗 {target['order_no']}：{e}"
+            log(reason_text)
             result["processed"] += 1
             result["failed"] += 1
+            result["errors"].append(reason_text)
             append_log_row(
                 log_ws, "BY電話", phone, phone, target.get("name", ""), target["address"], target["order_no"], display_service_date(target),
-                prev["order_no"], display_service_date(prev), "", 0, "失敗", str(e), "\n".join(CURRENT_ROW_LOGS)
+                prev["order_no"], display_service_date(prev), "", 0, "失敗", reason_text, "\n".join(CURRENT_ROW_LOGS)
             )
-
-    if result["failed"] > 0:
-        result["errors"].append(f"成功 {result['success']} 組，失敗 {result['failed']} 組")
 
     return result
 
 
-# ========================
-# Conditions mode
-# ========================
-def main_by_conditions(date_s: str, limit: int, ui_logger=None):
+def main_by_conditions(date_mode: str, date_start: str, date_end: str, purchase_status_name: str, limit: int, ui_logger=None):
     CURRENT_ROW_LOGS.clear()
     log = make_logger(ui_logger)
     log_ws = get_log_ws()
 
     result = blank_result()
 
-    if not parse_date(date_s):
-        msg = "日期格式錯誤，請輸入 YYYY/MM/DD"
-        log(f"❌ {msg}")
+    if not date_start and not date_end:
+        msg = "❌ 處理失敗：請至少選擇開始日期或結束日期"
+        log(msg)
+        result["failed"] = 1
+        result["errors"].append(msg)
+        return result
+
+    if date_start and not parse_date(date_start):
+        msg = "❌ 處理失敗：開始日期格式錯誤"
+        log(msg)
+        result["failed"] = 1
+        result["errors"].append(msg)
+        return result
+
+    if date_end and not parse_date(date_end):
+        msg = "❌ 處理失敗：結束日期格式錯誤"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
         return result
 
     log("\n===== BY搜尋條件 =====")
-    log(f"訂購日期: {date_s}")
-    log(f"條件: 付款狀態=已付款 + 服務狀態=未處理 + 每次只跑 {limit} 筆")
+    log(f"日期條件: {date_mode}")
+    log(f"日期區間: {date_start or '(空)'} ~ {date_end or '(空)'}")
+    log(f"付款狀態: {purchase_status_name}")
+    log(f"條件: 服務狀態=未處理 + 每次只跑 {limit} 筆")
 
     try:
         log("[登入] 已登入")
         session = login()
-        all_targets = search_by_conditions(session, date_s, limit=limit)
+        all_targets = search_by_conditions(
+            session=session,
+            date_mode=date_mode,
+            date_start=date_start,
+            date_end=date_end,
+            purchase_status_name=purchase_status_name,
+            limit=limit,
+        )
         all_targets = enrich_items_from_detail(session, all_targets)
     except Exception as e:
-        msg = f"搜尋失敗：{e}"
-        log(f"❌ {msg}")
+        msg = f"❌ 處理失敗：搜尋失敗：{e}"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
         return result
 
     if not all_targets:
-        msg = "查無符合條件訂單"
-        log(f"❌ {msg}")
+        msg = "❌ 處理失敗：查無符合條件訂單"
+        log(msg)
         result["failed"] = 1
         result["errors"].append(msg)
         append_log_row(
-            log_ws, "BY搜尋條件", date_s, "", "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS)
+            log_ws, "BY搜尋條件", f"{date_mode} {date_start}~{date_end} {purchase_status_name}",
+            "", "", "", "", "", "", "", "", 0, "失敗", msg, "\n".join(CURRENT_ROW_LOGS)
         )
         return result
 
@@ -1344,7 +1344,7 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
             log(f"日期: {target_service_date}")
 
             if not target_phone or not target_addr:
-                raise RuntimeError("目標單缺少電話或地址")
+                raise RuntimeError(f"❌ 處理失敗 {target.get('order_no','')}：目標單缺少電話或地址")
 
             items = search_paid_orders_by_phone(session, target_phone)
             items = enrich_items_from_detail(session, items, target_phone)
@@ -1353,22 +1353,22 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
             for i in items:
                 log(f"{display_service_date(i)} {i['order_no']} {i.get('name','')} {i['purchase_status_name']} {i['status']} {i['address']}")
 
-            prev = find_previous_processed(
-                target["order_no"],
-                target_addr,
-                target_phone,
-                target_form.get("service_date_obj"),
-                items,
+            prev, reason = find_previous_processed_verbose(
+                current_order_no=target["order_no"],
+                current_address=target_addr,
+                current_phone=target_phone,
+                current_service_date=target_form.get("service_date_obj"),
+                items=items,
             )
             if not prev:
-                raise RuntimeError("沒有上一筆已付款且相同電話地址的訂單")
+                raise RuntimeError(f"❌ 處理失敗 {target['order_no']}：{reason}")
 
             log(f"\n[上一筆] {display_service_date(prev)} {prev['order_no']} {prev.get('name','')} {prev['purchase_status_name']} {prev['status']} {prev['address']}")
 
             prev_form = parse_edit_page(session, prev["edit_url"], target_phone)
             prev_notice = str(prev_form.get("notice", "")).strip()
             if not prev_notice:
-                raise RuntimeError("上一筆找不到客服備註")
+                raise RuntimeError(f"❌ 處理失敗 {target['order_no']}：上一筆找不到客服備註")
 
             same_address_unprocessed = find_all_unprocessed_same_address(target_addr, target_phone, items)
             log(f"[本次共更新] {len(same_address_unprocessed)} 筆未處理訂單")
@@ -1398,12 +1398,14 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
             result["updated_orders"] += group_ok
 
             if group_fail:
-                log(f"❌ 失敗：成功 {group_ok} 筆，失敗 {len(group_fail)} 筆：{', '.join(group_fail)}")
+                reason_text = f"❌ 處理失敗 {target['order_no']}：失敗目標 {', '.join(group_fail)}"
+                log(reason_text)
                 result["failed"] += 1
+                result["errors"].append(reason_text)
                 append_log_row(
                     log_ws=log_ws,
                     source_type="BY搜尋條件",
-                    source_value=date_s,
+                    source_value=f"{date_mode} {date_start}~{date_end} {purchase_status_name}",
                     phone=target_phone,
                     name=target_name,
                     address=target_addr,
@@ -1414,7 +1416,7 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
                     prev_notice=prev_notice,
                     updated_orders=group_ok,
                     status="失敗",
-                    error_msg=f"失敗目標：{', '.join(group_fail)}",
+                    error_msg=reason_text,
                     full_log="\n".join(CURRENT_ROW_LOGS),
                 )
             else:
@@ -1423,7 +1425,7 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
                 append_log_row(
                     log_ws=log_ws,
                     source_type="BY搜尋條件",
-                    source_value=date_s,
+                    source_value=f"{date_mode} {date_start}~{date_end} {purchase_status_name}",
                     phone=target_phone,
                     name=target_name,
                     address=target_addr,
@@ -1439,13 +1441,15 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
                 )
 
         except Exception as e:
-            log(f"❌ 處理失敗 {target.get('order_no','')}：{e}")
+            reason_text = str(e)
+            log(reason_text)
             result["processed"] += 1
             result["failed"] += 1
+            result["errors"].append(reason_text)
             append_log_row(
                 log_ws=log_ws,
                 source_type="BY搜尋條件",
-                source_value=date_s,
+                source_value=f"{date_mode} {date_start}~{date_end} {purchase_status_name}",
                 phone=target.get("phone", ""),
                 name=target.get("name", ""),
                 address=target.get("address", ""),
@@ -1456,11 +1460,8 @@ def main_by_conditions(date_s: str, limit: int, ui_logger=None):
                 prev_notice="",
                 updated_orders=0,
                 status="失敗",
-                error_msg=str(e),
+                error_msg=reason_text,
                 full_log="\n".join(CURRENT_ROW_LOGS),
             )
-
-    if result["failed"] > 0:
-        result["errors"].append(f"成功 {result['success']} 筆，失敗 {result['failed']} 筆")
 
     return result
