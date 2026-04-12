@@ -3,7 +3,6 @@ import re
 import time
 from datetime import datetime
 from typing import Optional, List, Dict, Callable
-from urllib.parse import urljoin, urlparse, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,17 +24,15 @@ BASE_URL_PROD = getattr(env, "BASE_URL_PROD", "https://backend.lemonclean.com.tw
 BASE_URL = ""
 LOGIN_URL = ""
 PURCHASE_URL = ""
-MEMBER_URL = ""
 
 
 def set_env(env_name: str):
-    global ENV_NAME, BASE_URL, LOGIN_URL, PURCHASE_URL, MEMBER_URL
+    global ENV_NAME, BASE_URL, LOGIN_URL, PURCHASE_URL
     ENV_NAME = (env_name or "prod").lower()
     BASE_URL = BASE_URL_DEV if ENV_NAME == "dev" else BASE_URL_PROD
     BASE_URL = BASE_URL.rstrip("/")
     LOGIN_URL = f"{BASE_URL}/login"
     PURCHASE_URL = f"{BASE_URL}/purchase"
-    MEMBER_URL = f"{BASE_URL}/member"
 
 
 set_env(ENV_NAME)
@@ -191,20 +188,6 @@ def parse_row_spec(spec: str) -> List[int]:
     return sorted(x for x in rows if x >= 2)
 
 
-def build_absolute_url(href: str) -> str:
-    return urljoin(BASE_URL + "/", str(href or "").strip())
-
-
-def parse_query_params_from_url(url: str) -> Dict[str, str]:
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    result = {}
-    for k, v in qs.items():
-        if v:
-            result[k] = v[0]
-    return result
-
-
 def extract_name_from_text_block(text: str) -> str:
     lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
     for line in lines:
@@ -255,11 +238,6 @@ def display_service_date(item: Dict) -> str:
 
 def item_service_date_obj(item: Dict):
     return item.get("service_date_obj") or item.get("raw_date_obj")
-
-
-def extract_email_from_text(text: str) -> str:
-    m = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', str(text or ""))
-    return m.group(0) if m else ""
 
 
 def get_spreadsheet():
@@ -491,8 +469,6 @@ def parse_purchase_row_text(txt: str) -> Dict:
     if m_phone:
         phone = m_phone.group(1)
 
-    member_email = extract_email_from_text(txt)
-
     return {
         "order_no": order_no,
         "raw_date_str": raw_date_str,
@@ -506,7 +482,6 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "purchase_status": purchase_status,
         "service_date": "",
         "service_date_obj": None,
-        "member_email": member_email,
     }
 
 
@@ -525,16 +500,9 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
             continue
 
         edit_link = tr.select_one('a[href*="/purchase/edit/"]')
-        edit_url = build_absolute_url(edit_link["href"]) if edit_link else ""
+        edit_url = f"{BASE_URL}{edit_link['href']}" if edit_link and edit_link.get("href", "").startswith("/") else (edit_link["href"] if edit_link else "")
         row_data["edit_url"] = edit_url
         row_data["purchase_id"] = get_purchase_id_from_edit_url(edit_url)
-
-        member_link = tr.select_one('a[href*="/member?keyword="]')
-        if member_link:
-            href = member_link.get("href", "")
-            row_data["member_url"] = build_absolute_url(href)
-            row_data["member_email"] = parse_query_params_from_url(row_data["member_url"]).get("keyword", row_data.get("member_email", ""))
-
         data.append(row_data)
 
     dedup = {}
@@ -685,7 +653,10 @@ def search_by_conditions_once(session, date_mode: str, date_start: str, date_end
     r.raise_for_status()
 
     items = parse_purchase_list_page(r.text)
-    filtered = [x for x in items if x.get("status_code") == "0" and (not purchase_status or x.get("purchase_status") == purchase_status)]
+    filtered = [
+        x for x in items
+        if x.get("status_code") == "0" and (not purchase_status or x.get("purchase_status") == purchase_status)
+    ]
     if limit and limit > 0:
         filtered = filtered[:limit]
     return filtered
@@ -748,8 +719,17 @@ def parse_edit_page(session, edit_url, phone=""):
     if not form:
         raise RuntimeError(f"找不到表單: {edit_url}")
 
-    action = build_absolute_url(form.get("action") or edit_url)
-    current_query_params = parse_query_params_from_url(r.url)
+    action = form.get("action") or edit_url
+    if action.startswith("/"):
+        action = f"{BASE_URL}{action}"
+
+    current_query_params = {}
+    if "?" in r.url:
+        query = r.url.split("?", 1)[1]
+        for pair in query.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                current_query_params[k] = v
 
     fields = {}
     for el in form.select("input, textarea, select"):
@@ -805,12 +785,6 @@ def parse_edit_page(session, edit_url, phone=""):
     elif purchase_status == "3":
         purchase_status_name = "已退款"
 
-    member_email = (
-        str(fields.get("email", "")).strip()
-        or str(fields.get("member_email", "")).strip()
-        or extract_email_from_text(page_text)
-    )
-
     return {
         "action": action,
         "fields": fields,
@@ -828,7 +802,6 @@ def parse_edit_page(session, edit_url, phone=""):
         "page_text": page_text,
         "service_date": service_date,
         "service_date_obj": parse_date(service_date),
-        "member_email": member_email,
     }
 
 
@@ -843,7 +816,6 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
     item["name"] = detail.get("customer_name", "") or item.get("name", "")
     item["address"] = detail.get("address", "") or item.get("address", "")
     item["purchase_status_name"] = detail.get("purchase_status_name", "") or item.get("purchase_status_name", "")
-    item["member_email"] = detail.get("member_email", "") or item.get("member_email", "")
     return item
 
 
@@ -859,6 +831,7 @@ def enrich_items_from_detail(session, items: List[Dict], phone="") -> List[Dict]
 
 def dedupe_items_by_address(items: List[Dict]) -> List[Dict]:
     by_address = {}
+
     for item in items:
         key = normalize_address(item.get("address", ""))
         if not key:
@@ -1645,414 +1618,5 @@ def main_by_selected_order_ids(order_ids, ui_logger=None):
                 error_msg=reason_text,
                 full_log="\n".join(CURRENT_ROW_LOGS),
             )
-
-    return result
-
-
-# =========================
-# 地址備註更新：最終流程
-# 電話 -> purchase -> member email -> member
-# mail   -> member
-# =========================
-
-def search_member_page_by_email(session, email: str) -> str:
-    r = session_get(
-        session,
-        MEMBER_URL,
-        params={
-            "memberLevelId": "",
-            "keyword": email,
-            "dateS": "",
-            "dateE": "",
-        },
-    )
-    r.raise_for_status()
-    return r.text
-
-
-def resolve_member_email_from_phone(session, phone: str) -> str:
-    phone = normalize_phone(phone)
-    if not phone:
-        raise RuntimeError("電話不可為空")
-
-    items = search_all_orders_by_phone(session, phone)
-    if not items:
-        raise RuntimeError("查無電話對應的訂單")
-
-    items = enrich_items_from_detail(session, items, phone)
-
-    emails = []
-    seen = set()
-    for item in items:
-        email = item.get("member_email", "")
-        if email and email not in seen:
-            seen.add(email)
-            emails.append(email)
-
-    if not emails:
-        raise RuntimeError("由訂單列表找不到對應會員 mail")
-    if len(emails) > 1:
-        raise RuntimeError(f"此電話對應多個會員 mail：{', '.join(emails)}")
-
-    return emails[0]
-
-
-def parse_top_address_rows_from_member_html(html: str) -> List[Dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    rows = []
-    seen = set()
-
-    # 只抓上方地址區塊的 [備註] 連結
-    links = soup.select('a[href*="/address_memo/edit"]')
-
-    for link in links:
-        href = link.get("href", "")
-        edit_url = build_absolute_url(href)
-
-        parent = link.parent
-        row_text = parent.get_text(" ", strip=True) if parent else ""
-        address = extract_address_from_text_block(row_text) or row_text
-
-        key = normalize_address(address)
-        if not key:
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-
-        rows.append({
-            "address": address,
-            "edit_url": edit_url,
-            "existing_memo": "",
-        })
-
-    return rows
-
-
-def parse_address_memo_edit_page(session, edit_url: str, keyword: str = ""):
-    params = {}
-    if keyword:
-        params["keyword"] = keyword
-
-    r = session_get(session, edit_url, params=params)
-    r.raise_for_status()
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    page_text = soup.get_text("\n", strip=True)
-
-    existing_memo = ""
-    textareas = soup.select("textarea")
-    if textareas:
-        # 最大段通常是既有備註
-        existing_memo = max((ta.text.strip() for ta in textareas), key=len, default="")
-
-    form = soup.select_one("form")
-    form_info = None
-    if form:
-        action = build_absolute_url(form.get("action") or edit_url)
-        current_query_params = parse_query_params_from_url(r.url)
-
-        fields = {}
-        for el in form.select("input, textarea, select"):
-            name = el.get("name")
-            if not name:
-                continue
-
-            tag = el.name.lower()
-            if tag == "textarea":
-                fields[name] = el.text or ""
-            elif tag == "select":
-                selected = el.select_one("option[selected]")
-                fields[name] = selected.get("value", "") if selected else ""
-            else:
-                input_type = (el.get("type") or "text").lower()
-                if input_type in ("checkbox", "radio"):
-                    if el.has_attr("checked"):
-                        fields[name] = el.get("value", "on")
-                else:
-                    fields[name] = el.get("value", "")
-
-        if "_token" not in fields:
-            token_el = soup.select_one("input[name=_token]")
-            if token_el:
-                fields["_token"] = token_el.get("value", "")
-
-        form_info = {
-            "action": action,
-            "fields": fields,
-            "edit_url": r.url,
-            "query_params": current_query_params,
-        }
-
-    return {
-        "existing_memo": existing_memo,
-        "page_text": page_text,
-        "form_info": form_info,
-        "html": r.text,
-        "url": r.url,
-    }
-
-
-def find_add_new_memo_url(session, edit_url: str, keyword: str = "") -> str:
-    params = {}
-    if keyword:
-        params["keyword"] = keyword
-
-    r = session_get(session, edit_url, params=params)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    add_link = soup.select_one('a[href*="address_memo/create"], a[href*="address_memo/add"]')
-    if add_link:
-        return build_absolute_url(add_link.get("href", ""))
-
-    return edit_url
-
-
-def parse_address_memo_create_page(session, create_url: str, keyword: str = ""):
-    params = {}
-    if keyword:
-        params["keyword"] = keyword
-
-    r = session_get(session, create_url, params=params)
-    r.raise_for_status()
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    form = soup.select_one("form")
-    if not form:
-        raise RuntimeError("找不到地址備註新增表單")
-
-    action = build_absolute_url(form.get("action") or create_url)
-    current_query_params = parse_query_params_from_url(r.url)
-
-    fields = {}
-    for el in form.select("input, textarea, select"):
-        name = el.get("name")
-        if not name:
-            continue
-
-        tag = el.name.lower()
-        if tag == "textarea":
-            fields[name] = el.text or ""
-        elif tag == "select":
-            selected = el.select_one("option[selected]")
-            fields[name] = selected.get("value", "") if selected else ""
-        else:
-            input_type = (el.get("type") or "text").lower()
-            if input_type in ("checkbox", "radio"):
-                if el.has_attr("checked"):
-                    fields[name] = el.get("value", "on")
-            else:
-                fields[name] = el.get("value", "")
-
-    if "_token" not in fields:
-        token_el = soup.select_one("input[name=_token]")
-        if token_el:
-            fields["_token"] = token_el.get("value", "")
-
-    return {
-        "action": action,
-        "fields": fields,
-        "edit_url": r.url,
-        "query_params": current_query_params,
-    }
-
-
-def submit_new_address_memo(session, form_info, new_memo: str, keyword: str = ""):
-    action = form_info["action"]
-    fields = dict(form_info["fields"])
-    query_params = dict(form_info.get("query_params", {}))
-
-    textarea_keys = [k for k in fields.keys() if "memo" in k.lower() or "notice" in k.lower() or "content" in k.lower()]
-    if textarea_keys:
-        fields[textarea_keys[0]] = new_memo
-    else:
-        fields["memo"] = new_memo
-
-    if keyword and "keyword" not in query_params:
-        query_params["keyword"] = keyword
-
-    resp = session_post(
-        session,
-        action,
-        params=query_params,
-        data=fields,
-        headers={
-            "Referer": form_info["edit_url"],
-            "User-Agent": "Mozilla/5.0",
-        },
-        allow_redirects=True,
-    )
-    resp.raise_for_status()
-    return resp
-
-
-def find_top_address_memos_by_email(session, email: str) -> List[Dict]:
-    html = search_member_page_by_email(session, email)
-    rows = parse_top_address_rows_from_member_html(html)
-
-    for row in rows:
-        try:
-            page = parse_address_memo_edit_page(session, row["edit_url"], keyword=email)
-            row["existing_memo"] = page.get("existing_memo", "")
-        except Exception:
-            row["existing_memo"] = ""
-
-    return rows
-
-
-def count_different_addresses(address_rows: List[Dict]) -> int:
-    seen = set()
-    for row in address_rows:
-        addr = normalize_address(row.get("address", ""))
-        if addr:
-            seen.add(addr)
-    return len(seen)
-
-
-def search_orders_by_member_keyword(session, keyword: str) -> List[Dict]:
-    r = session_get(
-        session,
-        MEMBER_URL,
-        params={
-            "memberLevelId": "",
-            "keyword": keyword,
-            "dateS": "",
-            "dateE": "",
-        },
-    )
-    r.raise_for_status()
-
-    # 這裡不是從 member 結構抓訂單，而是保留 mail 當 member 主鍵，再用 purchase 的 keyword/name/phone 都不可靠
-    # 所以退回用 purchase list 裡的姓名/電話資料會不穩，這裡改用 keyword 直接查 purchase 的 member email 是否可通用
-    r2 = session_get(
-        session,
-        PURCHASE_URL,
-        params={
-            "keyword": keyword,
-            "name": "",
-            "phone": "",
-            "orderNo": "",
-            "date_s": "",
-            "date_e": "",
-            "clean_date_s": "",
-            "clean_date_e": "",
-            "paid_at_s": "",
-            "paid_at_e": "",
-            "refundDateS": "",
-            "refundDateE": "",
-            "buy": "",
-            "area_id": "",
-            "isCharge": "",
-            "isRefund": "",
-            "payway": "",
-            "purchase_status": "",
-            "progress_status": "",
-            "invoiceStatus": "",
-            "otherFee": "",
-            "orderBy": "",
-        },
-    )
-    r2.raise_for_status()
-    return parse_purchase_list_page(r2.text)
-
-
-def preview_future_orders_by_member_and_address(session, keyword: str, address: str, service_date: str):
-    base_dt = parse_date(service_date)
-    if not base_dt:
-        raise RuntimeError("服務日期格式錯誤")
-
-    items = search_orders_by_member_keyword(session, keyword)
-    items = enrich_items_from_detail(session, items)
-
-    targets = []
-    for item in items:
-        dt = item_service_date_obj(item)
-        if not dt:
-            continue
-        if dt > base_dt and same_address(item.get("address", ""), address):
-            targets.append(item)
-
-    targets.sort(key=lambda x: item_service_date_obj(x) or datetime.max)
-    return targets
-
-
-def update_future_orders_by_member_and_address(keyword: str, address: str, service_date: str, new_notice: str, ui_logger=None):
-    CURRENT_ROW_LOGS.clear()
-    log = make_logger(ui_logger)
-    log_ws = get_log_ws()
-    result = blank_result()
-
-    session = login(ui_logger=ui_logger)
-
-    address_rows = find_top_address_memos_by_email(session, keyword)
-    target_row = next((x for x in address_rows if same_address(x["address"], address)), None)
-    if not target_row:
-        raise RuntimeError("找不到對應地址")
-
-    create_url = find_add_new_memo_url(session, target_row["edit_url"], keyword=keyword)
-    create_form = parse_address_memo_create_page(session, create_url, keyword=keyword)
-    submit_new_address_memo(session, create_form, new_notice, keyword=keyword)
-    log("✅ 地址備註已新增並送出")
-
-    targets = preview_future_orders_by_member_and_address(session, keyword, address, service_date)
-
-    log("\n===== 地址備註批次更新 =====")
-    log(f"會員: {keyword}")
-    log(f"地址: {address}")
-    log(f"基準服務日期: {service_date}")
-    log(f"預計更新筆數: {len(targets)}")
-
-    if not targets:
-        msg = "查無此服務日期之後、且符合該地址的訂單可更新"
-        log(msg)
-        result["failed"] = 1
-        result["errors"].append(msg)
-        return result
-
-    for t in targets:
-        try:
-            log(f"👉 更新 {display_service_date(t)} {t['order_no']} {t.get('name','')} {t.get('address','')}")
-            tf = parse_edit_page(session, t["edit_url"], t.get("phone", ""))
-            submit_update(session, tf, t.get("phone", ""), new_notice)
-            time.sleep(SLEEP_SECONDS)
-
-            ok, _ = verify_update(session, t["edit_url"], t.get("phone", ""), new_notice)
-            result["processed"] += 1
-
-            if ok:
-                log(f"✅ 驗證成功 {t['order_no']}")
-                result["success"] += 1
-                result["updated_orders"] += 1
-            else:
-                reason_text = f"❌ 驗證失敗 {t['order_no']}"
-                log(reason_text)
-                result["failed"] += 1
-                result["errors"].append(reason_text)
-
-        except Exception as e:
-            reason_text = f"❌ 更新失敗 {t.get('order_no','')}：{e}"
-            log(reason_text)
-            result["processed"] += 1
-            result["failed"] += 1
-            result["errors"].append(reason_text)
-
-    append_log_row(
-        log_ws=log_ws,
-        source_type="BY地址備註更新",
-        source_value=keyword,
-        phone="",
-        name="",
-        address=address,
-        current_order="",
-        current_service_date=service_date,
-        prev_order="",
-        prev_service_date="",
-        prev_notice=new_notice,
-        updated_orders=result["updated_orders"],
-        status="成功" if result["failed"] == 0 else "部分失敗",
-        error_msg=" | ".join(result["errors"][:10]),
-        full_log="\n".join(CURRENT_ROW_LOGS),
-    )
 
     return result
