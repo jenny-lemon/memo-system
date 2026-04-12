@@ -59,10 +59,6 @@ hr {
     border-color: #ececec !important;
     margin: 14px 0 !important;
 }
-.small-muted {
-    color: #888;
-    font-size: 12px;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,17 +80,19 @@ DEFAULT_STATE = {
     "last_mode": "",
     "login_identity": "",
     "sheet_summary": None,
-
-    "address_member_candidates": [],
-    "address_selected_email": "",
-    "address_list": [],
+    "address_member_email": "",
+    "address_rows": [],
     "address_selected_value": "",
     "address_preview": None,
+    "address_existing_memo": "",
+    "address_distinct_count": 0,
 }
 
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+st.session_state.is_running = False
 
 
 def sec(title):
@@ -157,26 +155,23 @@ def clear_pick_states():
 
 
 def clear_address_flow_state():
-    st.session_state.address_member_candidates = []
-    st.session_state.address_selected_email = ""
-    st.session_state.address_list = []
+    st.session_state.address_member_email = ""
+    st.session_state.address_rows = []
     st.session_state.address_selected_value = ""
     st.session_state.address_preview = None
+    st.session_state.address_existing_memo = ""
+    st.session_state.address_distinct_count = 0
 
 
 def reset_before_action(clear_preview=True, clear_selection=True):
     st.session_state.logs = []
     st.session_state.result = None
-
     if clear_preview:
         st.session_state.preview_rows = []
         st.session_state.sheet_summary = None
-
     if clear_selection:
         clear_pick_states()
-
     clear_address_flow_state()
-
     try:
         log_box.code("尚未執行")
     except Exception:
@@ -259,14 +254,12 @@ def render_result_preview_blocks(rows):
                     oid = str(safe_get(row, "order_id", default="")).strip()
                     if oid:
                         st.session_state[f"pick_{oid}"] = True
-                st.rerun()
         with c2:
             if st.button("本區全不選", key=f"btn_unsel_{block_key}", use_container_width=True):
                 for row in block_rows:
                     oid = str(safe_get(row, "order_id", default="")).strip()
                     if oid:
                         st.session_state[f"pick_{oid}"] = False
-                st.rerun()
         with c3:
             st.caption(f"本區共 {len(block_rows)} 筆")
 
@@ -287,13 +280,11 @@ def render_result_preview_blocks(rows):
             has_same = bool(safe_get(row, "has_same_address_history", default=False))
 
             cols = st.columns([0.8, 1.4, 1.6, 2.8, 1.2, 1.0, 1.0, 1.0, 1.0, 1.2])
-
-            default_checked = has_same
             checked = cols[0].checkbox(
                 "選取",
                 key=f"pick_{order_id}",
                 label_visibility="collapsed",
-                value=st.session_state.get(f"pick_{order_id}", default_checked),
+                value=st.session_state.get(f"pick_{order_id}", has_same),
             )
             cols[1].write(order_id)
             cols[2].write(f"{customer_name}\n{phone}".strip())
@@ -337,7 +328,7 @@ def render_result_preview_blocks(rows):
 st.title("📋 Memo 自動回填系統")
 
 sec("1. 登入")
-col_e, col_p, col_env, col_login = st.columns([3.0, 3.0, 1.2, 1.2])
+col_e, col_p, col_env, col_login, col_unlock = st.columns([3.0, 3.0, 1.2, 1.2, 1.2])
 with col_e:
     email = st.text_input("Email")
 with col_p:
@@ -346,9 +337,17 @@ with col_env:
     env_option = st.selectbox("環境", ["prod", "dev"], index=0)
 with col_login:
     st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
-    login_clicked = st.button("Login", use_container_width=True, disabled=st.session_state.is_running)
+    login_clicked = st.button("Login", use_container_width=True)
+with col_unlock:
+    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+    unlock_clicked = st.button("解除鎖定", use_container_width=True)
 
 memo.set_env(env_option)
+
+if unlock_clicked:
+    st.session_state.is_running = False
+    st.session_state.logs = []
+    st.success("已解除鎖定")
 
 if login_clicked:
     try:
@@ -356,28 +355,25 @@ if login_clicked:
 
         if not email or not password:
             st.error("請先輸入 Email / Password")
-            st.stop()
+        else:
+            st.session_state.is_running = True
+            ui_log("===== 開始登入 =====")
+            memo.set_env(env_option)
+            memo.set_runtime_credentials(email, password)
 
-        st.session_state.is_running = True
-        ui_log("===== 開始登入 =====")
+            with st.spinner("登入中，請稍候…"):
+                memo.login(ui_logger=ui_log)
 
-        memo.set_env(env_option)
-        memo.set_runtime_credentials(email, password)
-
-        with st.spinner("登入中，請稍候…"):
-            memo.login(ui_logger=ui_log)
-
-        st.session_state.is_logged_in = True
-        st.session_state.login_identity = email
-        ui_log("✅ Login 成功")
-        st.success("登入成功，請往下設定查詢條件。")
+            st.session_state.is_logged_in = True
+            st.session_state.login_identity = email
+            ui_log("✅ Login 成功")
+            st.success("登入成功，請往下設定查詢條件。")
 
     except Exception as e:
         st.session_state.is_logged_in = False
         st.session_state.login_identity = ""
         ui_log(f"❌ Login 失敗：{e}")
         st.error(f"登入失敗：{e}")
-
     finally:
         st.session_state.is_running = False
 
@@ -432,19 +428,11 @@ if mode == "By Google Sheet":
         with c2:
             st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
             force = st.checkbox("強制重跑")
-        execute_btn = st.button(
-            "🚀 執行",
-            use_container_width=True,
-            disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-        )
+        execute_btn = st.button("🚀 執行", use_container_width=True, disabled=not st.session_state.is_logged_in)
     else:
         c1, c2 = st.columns(2)
         with c1:
-            sheet_summary_btn = st.button(
-                "🔍 查詢目前筆數",
-                use_container_width=True,
-                disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-            )
+            sheet_summary_btn = st.button("🔍 查詢目前筆數", use_container_width=True, disabled=not st.session_state.is_logged_in)
         with c2:
             sheet_limit = st.number_input("本次處理筆數", min_value=1, value=5)
 
@@ -455,11 +443,7 @@ if mode == "By Google Sheet":
             m2.metric("未處理筆數", s.get("pending_rows", 0))
             m3.metric("已處理筆數", s.get("done_rows", 0))
 
-        execute_btn = st.button(
-            "🚀 執行前 N 筆未處理資料",
-            use_container_width=True,
-            disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-        )
+        execute_btn = st.button("🚀 執行前 N 筆未處理資料", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
 elif mode == "By 電話":
     phone_text = st.text_input("電話號碼（可輸入多筆，用逗號分隔）", placeholder="例：0912345678,0922345678")
@@ -467,17 +451,9 @@ elif mode == "By 電話":
 
     c1, c2 = st.columns(2)
     with c1:
-        search_btn = st.button(
-            "🔍 查詢列表",
-            use_container_width=True,
-            disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-        )
+        search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.is_logged_in)
     with c2:
-        execute_btn = st.button(
-            "🚀 執行勾選項目",
-            use_container_width=True,
-            disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-        )
+        execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
 elif mode == "By 搜尋條件":
     c1, c2, c3 = st.columns([1.4, 1.4, 1.0])
@@ -496,49 +472,29 @@ elif mode == "By 搜尋條件":
 
     c6, c7 = st.columns(2)
     with c6:
-        search_btn = st.button(
-            "🔍 查詢列表",
-            use_container_width=True,
-            disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-        )
+        search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.is_logged_in)
     with c7:
-        execute_btn = st.button(
-            "🚀 執行勾選項目",
-            use_container_width=True,
-            disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-        )
+        execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
 else:
     c1, c2, c3 = st.columns([2, 2, 1.2])
     with c1:
         address_phone = st.text_input("電話（優先）")
     with c2:
-        address_mail = st.text_input("Mail（電話無法唯一對應時再補）")
+        address_mail = st.text_input("Mail（若直接知道可直接輸入）")
     with c3:
         base_service_date = st.date_input("基準服務日期", value=None)
 
-    address_find_member_btn = st.button(
-        "🔍 查詢會員 / 地址",
-        use_container_width=True,
-        disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-    )
+    address_find_member_btn = st.button("🔍 查詢會員 / 地址", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
-    if st.session_state.address_member_candidates:
-        sec("3. 會員確認")
-        if len(st.session_state.address_member_candidates) == 1:
-            st.session_state.address_selected_email = st.session_state.address_member_candidates[0]
-            st.success(f"已對應會員：{st.session_state.address_selected_email}")
-        else:
-            st.warning("此電話無法唯一對應會員，請選擇或改輸入 mail。")
-            st.session_state.address_selected_email = st.selectbox(
-                "選擇會員 mail",
-                st.session_state.address_member_candidates,
-                index=0,
-            )
+    if st.session_state.address_member_email:
+        st.success(f"已對應會員：{st.session_state.address_member_email}")
 
-    if st.session_state.address_list:
-        sec("4. 選擇要更新的地址")
-        address_options = [x["address"] for x in st.session_state.address_list]
+    if st.session_state.address_rows:
+        sec("3. 選擇要更新的地址")
+        st.caption(f"不同地址共 {st.session_state.address_distinct_count} 筆")
+
+        address_options = [x["address"] for x in st.session_state.address_rows]
         st.session_state.address_selected_value = st.radio(
             "地址清單",
             options=address_options,
@@ -546,27 +502,26 @@ else:
         )
 
         selected_addr_obj = next(
-            (x for x in st.session_state.address_list if x["address"] == st.session_state.address_selected_value),
+            (x for x in st.session_state.address_rows if x["address"] == st.session_state.address_selected_value),
             None
         )
         if selected_addr_obj:
-            st.caption(f"目前備註摘要：{selected_addr_obj.get('memo_summary', '') or '(空)'}")
+            st.caption("目前地址備註內容")
+            st.text_area(
+                "既有備註",
+                value=selected_addr_obj.get("existing_memo", ""),
+                height=220,
+                disabled=True,
+                key="existing_memo_view",
+            )
 
-        new_member_notice = st.text_area("新客服備註", height=180)
+        new_member_notice = st.text_area("新增客服備註內容", height=220)
 
         c4, c5 = st.columns(2)
         with c4:
-            address_preview_btn = st.button(
-                "🔍 預估更新筆數",
-                use_container_width=True,
-                disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-            )
+            address_preview_btn = st.button("🔍 預估更新筆數", use_container_width=True, disabled=not st.session_state.is_logged_in)
         with c5:
-            address_execute_btn = st.button(
-                "🚀 確認並更新",
-                use_container_width=True,
-                disabled=(st.session_state.is_running or not st.session_state.is_logged_in),
-            )
+            address_execute_btn = st.button("🚀 新增備註並送出", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
 with st.expander("5. 執行過程", expanded=True):
     log_box = st.empty()
@@ -579,7 +534,7 @@ if mode in ["By 電話", "By 搜尋條件"] and st.session_state.preview_rows:
 
 if mode == "By 地址備註更新" and st.session_state.address_preview:
     st.markdown("<hr>", unsafe_allow_html=True)
-    sec("5. 預估更新結果")
+    sec("4. 預估更新結果")
     preview = st.session_state.address_preview
     c1, c2, c3 = st.columns(3)
     c1.metric("會員 mail", preview.get("email", ""))
@@ -596,20 +551,13 @@ if st.session_state.result is not None:
     render_result(st.session_state.result)
 
 if sheet_summary_btn:
-    if not st.session_state.is_logged_in:
-        st.warning("請先登入")
-        st.stop()
     try:
         st.session_state.is_running = True
         reset_before_action(clear_preview=True, clear_selection=True)
         ui_log("===== 查詢目前筆數 =====")
-
         with st.spinner("查詢中，請稍候…"):
             st.session_state.sheet_summary = memo.get_sheet_summary(ui_logger=ui_log)
-
         ui_log("✅ 查詢完成")
-        st.rerun()
-
     except Exception as e:
         ui_log(f"❌ 查詢失敗：{e}")
         st.error(str(e))
@@ -617,10 +565,6 @@ if sheet_summary_btn:
         st.session_state.is_running = False
 
 if search_btn:
-    if not st.session_state.is_logged_in:
-        st.warning("請先登入")
-        st.stop()
-
     try:
         st.session_state.is_running = True
         reset_before_action(clear_preview=True, clear_selection=True)
@@ -645,7 +589,6 @@ if search_btn:
 
         st.session_state.preview_rows = preview_rows or []
         ui_log(f"✅ 查詢完成，共 {len(st.session_state.preview_rows)} 筆")
-        st.rerun()
 
     except Exception as e:
         ui_log(f"❌ 查詢錯誤：{e}")
@@ -654,10 +597,6 @@ if search_btn:
         st.session_state.is_running = False
 
 if address_find_member_btn:
-    if not st.session_state.is_logged_in:
-        st.warning("請先登入")
-        st.stop()
-
     try:
         st.session_state.is_running = True
         reset_before_action(clear_preview=True, clear_selection=True)
@@ -670,30 +609,26 @@ if address_find_member_btn:
         ui_log("===== 開始查詢會員 / 地址 =====")
         session = memo.login(ui_logger=ui_log)
 
-        emails = []
+        resolved_email = ""
         if address_phone.strip():
-            emails = memo.find_member_by_phone(session, address_phone.strip())
-            if len(emails) == 1:
-                st.session_state.address_selected_email = emails[0]
+            resolved_email = memo.resolve_member_email_from_phone(session, address_phone.strip())
+            ui_log(f"由電話對應會員 mail：{resolved_email}")
+        elif address_mail.strip():
+            resolved_email = address_mail.strip()
 
-        if address_mail.strip():
-            if address_mail.strip() not in emails:
-                emails.append(address_mail.strip())
-            st.session_state.address_selected_email = address_mail.strip()
+        if not resolved_email:
+            raise RuntimeError("找不到可用的會員 mail")
 
-        if not emails:
-            raise RuntimeError("找不到對應會員，請改輸入 mail")
-        st.session_state.address_member_candidates = emails
-
-        selected_email = st.session_state.address_selected_email or emails[0]
-        address_rows = memo.find_all_address_memo(session, selected_email)
+        st.session_state.address_member_email = resolved_email
+        address_rows = memo.find_top_address_memos_by_email(session, resolved_email)
         if not address_rows:
-            raise RuntimeError("找不到此會員的地址備註資料")
+            raise RuntimeError("找不到此會員的上方地址備註資料")
 
-        st.session_state.address_list = address_rows
+        st.session_state.address_rows = address_rows
+        st.session_state.address_distinct_count = memo.count_different_addresses(address_rows)
 
-        ui_log(f"✅ 找到會員候選 {len(emails)} 個，地址 {len(address_rows)} 筆")
-        st.rerun()
+        ui_log(f"✅ 找到上方地址備註 {len(address_rows)} 筆")
+        ui_log(f"✅ 不同地址共 {st.session_state.address_distinct_count} 筆")
 
     except Exception as e:
         ui_log(f"❌ 查詢失敗：{e}")
@@ -702,10 +637,6 @@ if address_find_member_btn:
         st.session_state.is_running = False
 
 if address_preview_btn:
-    if not st.session_state.is_logged_in:
-        st.warning("請先登入")
-        st.stop()
-
     try:
         st.session_state.is_running = True
         st.session_state.logs = []
@@ -713,7 +644,7 @@ if address_preview_btn:
         st.session_state.address_preview = None
         log_box.code("尚未執行")
 
-        if not st.session_state.address_selected_email:
+        if not st.session_state.address_member_email:
             raise ValueError("請先查詢並確認會員")
         if not st.session_state.address_selected_value:
             raise ValueError("請先選擇地址")
@@ -724,19 +655,18 @@ if address_preview_btn:
         session = memo.login(ui_logger=ui_log)
         items = memo.preview_future_orders_by_member_and_address(
             session=session,
-            keyword=st.session_state.address_selected_email,
+            keyword=st.session_state.address_member_email,
             address=st.session_state.address_selected_value,
             service_date=base_service_date.strftime("%Y/%m/%d"),
         )
 
         st.session_state.address_preview = {
-            "email": st.session_state.address_selected_email,
+            "email": st.session_state.address_member_email,
             "address": st.session_state.address_selected_value,
             "count": len(items),
             "items": items,
         }
         ui_log(f"✅ 預計更新 {len(items)} 筆")
-        st.rerun()
 
     except Exception as e:
         ui_log(f"❌ 預估失敗：{e}")
@@ -745,10 +675,6 @@ if address_preview_btn:
         st.session_state.is_running = False
 
 if execute_btn:
-    if not st.session_state.is_logged_in:
-        st.warning("請先登入")
-        st.stop()
-
     try:
         st.session_state.is_running = True
         reset_before_execute_keep_preview()
@@ -762,8 +688,7 @@ if execute_btn:
                     result = memo.main_first_n_pending(limit=int(sheet_limit), ui_logger=ui_log)
         else:
             if not st.session_state.preview_rows:
-                st.warning("請先查詢列表")
-                st.stop()
+                raise RuntimeError("請先查詢列表")
 
             current_selected_ids = []
             for row in st.session_state.preview_rows:
@@ -772,8 +697,7 @@ if execute_btn:
                     current_selected_ids.append(oid)
 
             if not current_selected_ids:
-                st.warning("請先勾選要執行的資料")
-                st.stop()
+                raise RuntimeError("請先勾選要執行的資料")
 
             ui_log("===== 開始執行勾選項目 =====")
             ui_log(f"勾選筆數：{len(current_selected_ids)}")
@@ -793,29 +717,25 @@ if execute_btn:
         st.session_state.is_running = False
 
 if address_execute_btn:
-    if not st.session_state.is_logged_in:
-        st.warning("請先登入")
-        st.stop()
-
     try:
         st.session_state.is_running = True
         st.session_state.logs = []
         st.session_state.result = None
         log_box.code("尚未執行")
 
-        if not st.session_state.address_selected_email:
+        if not st.session_state.address_member_email:
             raise ValueError("請先查詢並確認會員")
         if not st.session_state.address_selected_value:
             raise ValueError("請先選擇地址")
         if not base_service_date:
             raise ValueError("請先選擇基準服務日期")
         if not new_member_notice.strip():
-            raise ValueError("請輸入新客服備註")
+            raise ValueError("請輸入新增客服備註內容")
 
-        ui_log("===== 開始地址備註批次更新 =====")
+        ui_log("===== 開始新增地址備註並更新訂單 =====")
         with st.spinner("執行中，請稍候…"):
             result = memo.update_future_orders_by_member_and_address(
-                keyword=st.session_state.address_selected_email,
+                keyword=st.session_state.address_member_email,
                 address=st.session_state.address_selected_value,
                 service_date=base_service_date.strftime("%Y/%m/%d"),
                 new_notice=new_member_notice.strip(),
