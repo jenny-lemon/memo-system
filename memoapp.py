@@ -1,3 +1,5 @@
+# memoapp.py
+# 若你原本跑的是 app.py，直接把這份內容覆蓋 app.py 即可
 # -*- coding: utf-8 -*-
 import streamlit as st
 import memo
@@ -385,7 +387,6 @@ sheet_limit = 5
 phone_text = ""
 date_mode = "服務日期"
 purchase_status_name = "全部"
-limit = 5
 start_date = None
 end_date = None
 
@@ -422,7 +423,7 @@ if mode == "By Google Sheet":
 
 elif mode == "By 電話":
     phone_text = st.text_input("電話號碼（可輸入多筆，用逗號分隔）", placeholder="例：0912345678,0922345678")
-    st.caption("可輸入多筆電話，用逗號分隔；會先查詢列表，再勾選執行。")
+    st.caption("可輸入多筆電話，用逗號分隔；查詢列表不會先套用處理筆數，會先查詢列表，再勾選執行。")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -431,24 +432,24 @@ elif mode == "By 電話":
         execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
 else:
-    c1, c2, c3 = st.columns([1.4, 1.4, 1.0])
+    c1, c2 = st.columns(2)
     with c1:
         date_mode = st.selectbox("日期條件", ["服務日期", "購買日期"])
     with c2:
         purchase_status_name = st.selectbox("付款狀態", ["全部", "已付款", "未付款"], index=0)
-    with c3:
-        limit = st.number_input("處理筆數", min_value=1, value=5)
 
-    c4, c5 = st.columns(2)
-    with c4:
+    c3, c4 = st.columns(2)
+    with c3:
         start_date = st.date_input("開始日期", value=None)
-    with c5:
+    with c4:
         end_date = st.date_input("結束日期", value=None)
 
-    c6, c7 = st.columns(2)
-    with c6:
+    st.caption("搜尋條件查詢固定只撈服務狀態＝未處理；查詢列表不會先套用處理筆數。")
+
+    c5, c6 = st.columns(2)
+    with c5:
         search_btn = st.button("🔍 查詢列表", use_container_width=True, disabled=not st.session_state.is_logged_in)
-    with c7:
+    with c6:
         execute_btn = st.button("🚀 執行勾選項目", use_container_width=True, disabled=not st.session_state.is_logged_in)
 
 with st.expander("4. 執行過程", expanded=True):
@@ -497,7 +498,6 @@ if search_btn:
                     date_start=start_text,
                     date_end=end_text,
                     purchase_status_name=purchase_status_name,
-                    limit=int(limit),
                     ui_logger=ui_log,
                 )
 
