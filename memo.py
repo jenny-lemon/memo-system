@@ -483,6 +483,8 @@ def parse_purchase_row_text(txt: str) -> Dict:
         "purchase_status": purchase_status,
         "service_date": "",
         "service_date_obj": None,
+        "notice": "",
+        "_detail": {},
     }
 
 
@@ -510,39 +512,6 @@ def parse_purchase_list_page(html: str) -> List[Dict]:
     for item in data:
         dedup[item["order_no"]] = item
     return list(dedup.values())
-
-
-def search_paid_orders_by_phone(session, phone) -> List[Dict]:
-    r = session_get(
-        session,
-        PURCHASE_URL,
-        params={
-            "keyword": "",
-            "name": "",
-            "phone": phone,
-            "orderNo": "",
-            "date_s": "",
-            "date_e": "",
-            "clean_date_s": "",
-            "clean_date_e": "",
-            "paid_at_s": "",
-            "paid_at_e": "",
-            "refundDateS": "",
-            "refundDateE": "",
-            "buy": "",
-            "area_id": "",
-            "isCharge": "",
-            "isRefund": "",
-            "payway": "",
-            "purchase_status": "1",
-            "progress_status": "",
-            "invoiceStatus": "",
-            "otherFee": "",
-            "orderBy": "",
-        },
-    )
-    r.raise_for_status()
-    return parse_purchase_list_page(r.text)
 
 
 def search_all_orders_by_phone(session, phone) -> List[Dict]:
@@ -637,7 +606,7 @@ def search_by_conditions_once(session, date_mode: str, date_start: str, date_end
         "isRefund": "",
         "payway": "",
         "purchase_status": purchase_status,
-        "progress_status": "0",  # 目標單固定只撈未處理
+        "progress_status": "0",  # 目標單固定未處理
         "invoiceStatus": "",
         "otherFee": "",
         "orderBy": "",
@@ -783,11 +752,20 @@ def parse_edit_page(session, edit_url, phone=""):
     elif purchase_status == "3":
         purchase_status_name = "已退款"
 
+    status_name = ""
+    if progress == "0":
+        status_name = "未處理"
+    elif progress == "1":
+        status_name = "已處理"
+    elif progress == "2":
+        status_name = "已完成"
+
     return {
         "action": action,
         "fields": fields,
         "notice": notice,
         "progress": progress,
+        "status_name": status_name,
         "purchase_status": purchase_status,
         "purchase_status_name": purchase_status_name,
         "order_no": order_no,
@@ -816,6 +794,10 @@ def enrich_item_from_detail(session, item: Dict, phone="") -> Dict:
     item["purchase_status_name"] = detail.get("purchase_status_name", "") or item.get("purchase_status_name", "")
     item["purchase_status"] = detail.get("purchase_status", "") or item.get("purchase_status", "")
     item["progress"] = detail.get("progress", "") or item.get("progress", "")
+    item["status_code"] = detail.get("progress", "") or item.get("status_code", "")
+    item["status"] = detail.get("status_name", "") or item.get("status", "")
+    item["notice"] = detail.get("notice", "") or item.get("notice", "")
+    item["_detail"] = detail
     return item
 
 
@@ -840,104 +822,68 @@ def enrich_items_from_detail(session, items: List[Dict], phone="", log=None, con
     return result
 
 
-def dedupe_items_by_address(items: List[Dict]) -> List[Dict]:
-    by_address = {}
+def find_best_source_order(current_item: Dict, history_items: List[Dict]) -> Optional[Dict]:
+    candidates = []
 
-    for item in items:
-        key = normalize_address(item.get("address", ""))
-        if not key:
+    current_order_no = current_item.get("order_no", "")
+    current_phone = normalize_phone(current_item.get("phone", ""))
+    current_addr = current_item.get("address", "")
+    current_dt = item_service_date_obj(current_item)
+
+    for x in history_items:
+        if x.get("order_no") == current_order_no:
             continue
 
-        existed = by_address.get(key)
-        current_dt = item_service_date_obj(item) or datetime.min
-
-        if not existed:
-            by_address[key] = item
+        if current_phone and x.get("phone") and normalize_phone(x.get("phone")) != current_phone:
             continue
 
-        existed_dt = item_service_date_obj(existed) or datetime.min
-        if current_dt > existed_dt:
-            by_address[key] = item
-
-    result = list(by_address.values())
-    result.sort(key=lambda x: item_service_date_obj(x) or datetime.min, reverse=True)
-    return result
-
-
-def log_candidate_addresses(log, items: List[Dict]):
-    log("\n[列表頁候選 - 各地址一筆]")
-    deduped = dedupe_items_by_address(items)
-    for i in deduped:
-        log(
-            f"{display_service_date(i)} {i['order_no']} "
-            f"{i.get('name', '')} {i.get('purchase_status_name', '')} {i['status']} {i['address']}"
-        )
-
-
-def find_previous_processed_verbose(current_order_no, current_address, current_phone, current_service_date, items):
-    same_phone = []
-    same_address_items = []
-    earlier_items = []
-    paid_items = []
-    processed_items = []
-
-    for x in items:
-        if x["order_no"] == current_order_no:
+        if not same_address(x.get("address", ""), current_addr):
             continue
-
-        if current_phone and x.get("phone") and normalize_phone(x["phone"]) != normalize_phone(current_phone):
-            continue
-        same_phone.append(x)
-
-        if not same_address(x.get("address", ""), current_address):
-            continue
-        same_address_items.append(x)
 
         dt = item_service_date_obj(x)
         if not dt:
             continue
-
-        if current_service_date and dt >= current_service_date:
+        if current_dt and dt >= current_dt:
             continue
-        earlier_items.append(x)
 
         if x.get("purchase_status") != "1":
             continue
-        paid_items.append(x)
 
         if x.get("status_code") not in ("1", "2"):
             continue
-        processed_items.append(x)
 
-    if processed_items:
-        processed_items.sort(key=lambda k: item_service_date_obj(k), reverse=True)
-        return processed_items[0], ""
-
-    if not same_phone:
-        return None, "沒有相同電話的歷史訂單"
-    if not same_address_items:
-        return None, "有相同電話，但沒有相同地址的歷史訂單"
-    if not earlier_items:
-        return None, "有相同電話地址的訂單，但沒有更早的服務日期"
-    if not paid_items:
-        return None, "有相同電話地址且更早的訂單，但付款狀態不是已付款"
-
-    return None, "有相同電話地址且已付款的更早訂單，但服務狀態不是已處理"
-
-
-def find_all_unprocessed_same_address(current_address, current_phone, items):
-    targets = []
-    for x in items:
-        if x.get("status_code") != "0":
+        notice = str(x.get("notice", "")).strip()
+        if not notice:
             continue
-        if not same_address(x.get("address", ""), current_address):
-            continue
-        if current_phone and x.get("phone") and normalize_phone(x["phone"]) != normalize_phone(current_phone):
-            continue
-        targets.append(x)
 
-    targets.sort(key=lambda k: (item_service_date_obj(k) or datetime.max, k.get("order_no", "")))
-    return targets
+        candidates.append(x)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda k: item_service_date_obj(k), reverse=True)
+    return candidates[0]
+
+
+def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
+    source = find_best_source_order(target, history_items)
+
+    return {
+        "order_id": target.get("order_no", ""),
+        "customer_name": target.get("name", ""),
+        "phone": target.get("phone", ""),
+        "address": target.get("address", ""),
+        "service_date": display_service_date(target),
+        "purchase_status_name": target.get("purchase_status_name", ""),
+        "status_name": target.get("status", ""),
+        "source_order_id": source.get("order_no", "") if source else "",
+        "source_service_date": display_service_date(source) if source else "",
+        "source_purchase_status_name": source.get("purchase_status_name", "") if source else "",
+        "source_status_name": source.get("status", "") if source else "",
+        "source_notice_exists": bool(str(source.get("notice", "")).strip()) if source else False,
+        "source_notice_preview": str(source.get("notice", "")).strip()[:80] if source else "",
+        "can_autofill": bool(source),
+    }
 
 
 def submit_update(session, form_info, phone, new_notice):
@@ -986,175 +932,187 @@ def verify_update(session, edit_url, phone, expected_notice):
 
     actual_notice = str(form.get("notice", "")).strip()
     actual_progress = str(form.get("progress", "")).strip()
-    page_text = str(form.get("page_text", ""))
 
     norm_expected = normalize_text(expected_notice)
     norm_actual = normalize_text(actual_notice)
 
     notice_ok = norm_actual == norm_expected or (norm_expected[:20] and norm_expected[:20] in norm_actual)
-    progress_ok = actual_progress == "1" or "已處理" in page_text
+    progress_ok = actual_progress == "1"
 
     return notice_ok and progress_ok, form
 
 
-def process_single_case(session, order, name, phone, addr, date, log):
-    current_service_date = parse_date(date)
+def get_target_and_source_for_order(session, target: Dict, log) -> Dict:
+    target_order_no = target.get("order_no", "")
+    target_form = parse_edit_page(session, target["edit_url"], target.get("phone", ""))
 
-    log(f"訂單: {order}")
-    log(f"客戶: {name}")
-    log(f"電話: {phone}")
-    log(f"地址: {addr}")
-    log(f"日期: {date}")
+    target_phone = normalize_phone(target_form.get("phone", "") or target.get("phone", ""))
+    target_name = target_form.get("customer_name", "") or target.get("name", "")
+    target_addr = target_form.get("address", "") or target.get("address", "")
+    target_service_date = target_form.get("service_date", "") or display_service_date(target)
+
+    if not target_phone or not target_addr:
+        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：目標單缺少電話或地址")
 
     log("[歷史查詢] 開始抓同電話全部歷史訂單")
-    items = search_all_orders_by_phone(session, phone)
+    items = search_all_orders_by_phone(session, target_phone)
     log(f"[歷史查詢] 主列表共 {len(items)} 筆")
 
     items = enrich_items_from_detail(
         session,
         items,
-        phone,
+        target_phone,
         log=log,
-        context_label=f"同電話 {phone} 歷史訂單"
+        context_label=f"同電話 {target_phone} 歷史訂單"
     )
 
-    log_candidate_addresses(log, items)
+    target_item = None
+    for x in items:
+        if x.get("order_no") == target_order_no:
+            target_item = x
+            break
 
-    prev, reason = find_previous_processed_verbose(order, addr, phone, current_service_date, items)
-    if not prev:
-        reason_text = f"❌ 處理失敗 {order}：{reason}"
-        log(reason_text)
-        return {
-            "ok": False,
-            "prev_date": "",
-            "prev_order": "",
-            "prev_notice": "",
-            "updated_orders": 0,
-            "error": reason_text,
+    if not target_item:
+        target_item = {
+            "order_no": target_order_no,
+            "phone": target_phone,
+            "name": target_name,
+            "address": target_addr,
+            "service_date": target_service_date,
+            "service_date_obj": target_form.get("service_date_obj"),
+            "purchase_status_name": target.get("purchase_status_name", ""),
+            "purchase_status": target.get("purchase_status", ""),
+            "status": "未處理",
+            "status_code": "0",
+            "edit_url": target.get("edit_url", ""),
         }
 
-    prev_form = parse_edit_page(session, prev["edit_url"], phone)
-    prev_notice = str(prev_form.get("notice", "")).strip()
+    source = find_best_source_order(target_item, items)
+    if not source:
+        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：找不到同地址＋已付款＋已處理＋有備註的最近來源單")
 
-    if prev_form.get("purchase_status") != "1":
-        reason_text = f"❌ 處理失敗 {order}：上一筆不是已付款"
-        log(reason_text)
-        return {
-            "ok": False,
-            "prev_date": display_service_date(prev),
-            "prev_order": prev["order_no"],
-            "prev_notice": "",
-            "updated_orders": 0,
-            "error": reason_text,
-        }
+    source_notice = str(source.get("notice", "")).strip()
+    if not source_notice:
+        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：來源單沒有客服備註")
 
-    if prev_form.get("progress") not in ("1", "2"):
-        reason_text = f"❌ 處理失敗 {order}：上一筆不是已處理/已完成"
-        log(reason_text)
-        return {
-            "ok": False,
-            "prev_date": display_service_date(prev),
-            "prev_order": prev["order_no"],
-            "prev_notice": "",
-            "updated_orders": 0,
-            "error": reason_text,
-        }
-
-    if not prev_notice:
-        reason_text = f"❌ 處理失敗 {order}：上一筆找不到客服備註"
-        log(reason_text)
-        return {
-            "ok": False,
-            "prev_date": display_service_date(prev),
-            "prev_order": prev["order_no"],
-            "prev_notice": "",
-            "updated_orders": 0,
-            "error": reason_text,
-        }
-
-    targets = find_all_unprocessed_same_address(addr, phone, items)
-    if not targets:
-        reason_text = f"❌ 處理失敗 {order}：沒有未處理目標單"
-        log(reason_text)
-        return {
-            "ok": False,
-            "prev_date": display_service_date(prev),
-            "prev_order": prev["order_no"],
-            "prev_notice": prev_notice,
-            "updated_orders": 0,
-            "error": reason_text,
-        }
-
-    log(f"\n[上一筆來源] {display_service_date(prev)} {prev['order_no']} {prev.get('name', '')} {prev.get('purchase_status_name', '')} {prev['status']} {prev['address']}")
-    log(f"[本次共更新] {len(targets)} 筆未處理訂單")
-
-    success_count = 0
-    fail_list = []
-
-    for t in targets:
-        log(f"👉 寫入 {display_service_date(t)} {t['order_no']} {t.get('name', '')} {t.get('purchase_status_name', '')} {t['status']} {t['address']}")
-        try:
-            target_form = parse_edit_page(session, t["edit_url"], phone)
-            submit_update(session, target_form, phone, prev_notice)
-            time.sleep(SLEEP_SECONDS)
-
-            ok, vf = verify_update(session, t["edit_url"], phone, prev_notice)
-            if ok:
-                log(f"✅ 驗證成功 {t['order_no']}")
-                success_count += 1
-            else:
-                log(f"❌ 驗證失敗 {t['order_no']} (progress={vf.get('progress', '')}, notice_head={str(vf.get('notice', ''))[:30]})")
-                fail_list.append(t["order_no"])
-        except Exception as e:
-            log(f"❌ 寫入失敗 {t['order_no']}：{e}")
-            fail_list.append(t["order_no"])
-
-    if not fail_list:
-        log(f"✅ 成功：已回填 {success_count} 筆")
-        return {
-            "ok": True,
-            "prev_date": display_service_date(prev),
-            "prev_order": prev["order_no"],
-            "prev_notice": prev_notice,
-            "updated_orders": success_count,
-            "error": "",
-        }
-
-    reason_text = f"❌ 處理失敗 {order}：失敗目標 {', '.join(fail_list)}"
-    log(reason_text)
     return {
-        "ok": False,
-        "prev_date": display_service_date(prev),
-        "prev_order": prev["order_no"],
-        "prev_notice": prev_notice,
-        "updated_orders": success_count,
-        "error": reason_text,
+        "target_form": target_form,
+        "target_phone": target_phone,
+        "target_name": target_name,
+        "target_addr": target_addr,
+        "target_service_date": target_service_date,
+        "source": source,
+        "source_notice": source_notice,
     }
 
 
-def build_preview_row(target: Dict, history_items: List[Dict]) -> Dict:
-    addr = target.get("address", "")
-    same_count = 0
-    diff_count = 0
+def execute_target_order(session, target: Dict, source_type: str, source_value: str, log, log_ws):
+    CURRENT_ROW_LOGS.clear()
 
-    for x in history_items:
-        if x.get("order_no") == target.get("order_no"):
-            continue
-        if same_address(x.get("address", ""), addr):
-            same_count += 1
-        else:
-            diff_count += 1
+    target_order_no = target.get("order_no", "")
+    meta = get_target_and_source_for_order(session, target, log)
 
+    target_form = meta["target_form"]
+    target_phone = meta["target_phone"]
+    target_name = meta["target_name"]
+    target_addr = meta["target_addr"]
+    target_service_date = meta["target_service_date"]
+    source = meta["source"]
+    source_notice = meta["source_notice"]
+
+    log(f"\n===== 處理訂單 {target_order_no} =====")
+    log(f"目前訂單: {target_order_no}")
+    log(f"客戶: {target_name}")
+    log(f"電話: {target_phone}")
+    log(f"地址: {target_addr}")
+    log(f"日期: {target_service_date}")
+    log(f"[來源訂單] {source.get('order_no', '')} / {display_service_date(source)} / {source.get('purchase_status_name', '')} / {source.get('status', '')}")
+
+    submit_update(session, target_form, target_phone, source_notice)
+    time.sleep(SLEEP_SECONDS)
+
+    ok, verified_form = verify_update(session, target["edit_url"], target_phone, source_notice)
+    if not ok:
+        reason_text = f"❌ 處理失敗 {target_order_no}：更新後驗證失敗"
+        log(reason_text)
+        append_log_row(
+            log_ws=log_ws,
+            source_type=source_type,
+            source_value=source_value,
+            phone=target_phone,
+            name=target_name,
+            address=target_addr,
+            current_order=target_order_no,
+            current_service_date=target_service_date,
+            prev_order=source["order_no"],
+            prev_service_date=display_service_date(source),
+            prev_notice=source_notice,
+            updated_orders=0,
+            status="失敗",
+            error_msg=reason_text,
+            full_log="\n".join(CURRENT_ROW_LOGS),
+        )
+        return {"ok": False, "error": reason_text, "updated_orders": 0}
+
+    log(f"✅ 驗證成功 {target_order_no}")
+    append_log_row(
+        log_ws=log_ws,
+        source_type=source_type,
+        source_value=source_value,
+        phone=target_phone,
+        name=target_name,
+        address=target_addr,
+        current_order=target_order_no,
+        current_service_date=target_service_date,
+        prev_order=source["order_no"],
+        prev_service_date=display_service_date(source),
+        prev_notice=source_notice,
+        updated_orders=1,
+        status="成功",
+        error_msg="",
+        full_log="\n".join(CURRENT_ROW_LOGS),
+    )
+    return {"ok": True, "error": "", "updated_orders": 1}
+
+
+def process_single_case(session, order, name, phone, addr, date, log):
+    target_items = search_orders_by_order_no(session, order)
+    target_items = enrich_items_from_detail(session, target_items, phone, log=log, context_label=f"目標訂單 {order}")
+    target = next((x for x in target_items if x.get("order_no") == order), None)
+
+    if not target:
+        raise RuntimeError(f"❌ 處理失敗 {order}：找不到目標訂單")
+
+    meta = get_target_and_source_for_order(session, target, log)
+    target_form = meta["target_form"]
+    target_phone = meta["target_phone"]
+    source = meta["source"]
+    source_notice = meta["source_notice"]
+
+    submit_update(session, target_form, target_phone, source_notice)
+    time.sleep(SLEEP_SECONDS)
+
+    ok, _ = verify_update(session, target["edit_url"], target_phone, source_notice)
+    if ok:
+        log(f"✅ 成功：已回填 {order}")
+        return {
+            "ok": True,
+            "prev_date": display_service_date(source),
+            "prev_order": source["order_no"],
+            "prev_notice": source_notice,
+            "updated_orders": 1,
+            "error": "",
+        }
+
+    reason_text = f"❌ 處理失敗 {order}：更新後驗證失敗"
+    log(reason_text)
     return {
-        "order_id": target.get("order_no", ""),
-        "customer_name": target.get("name", ""),
-        "phone": target.get("phone", ""),
-        "address": addr,
-        "service_date": display_service_date(target),
-        "same_address_count": same_count,
-        "different_address_count": diff_count,
-        "has_same_address_history": same_count > 0,
-        "purchase_status_name": target.get("purchase_status_name", ""),
+        "ok": False,
+        "prev_date": display_service_date(source),
+        "prev_order": source["order_no"],
+        "prev_notice": source_notice,
+        "updated_orders": 0,
+        "error": reason_text,
     }
 
 
@@ -1183,35 +1141,23 @@ def preview_by_phone(phone, ui_logger=None):
         context_label=f"電話 {phone} 查詢結果"
     )
 
-    if not items:
-        return []
+    targets = [x for x in items if x.get("status_code") == "0"]
 
     preview = []
-    total = len(items)
-
-    for idx, item in enumerate(items, start=1):
-        addr = item.get("address", "")
-        if not addr:
-            continue
+    total = len(targets)
+    for idx, item in enumerate(targets, start=1):
         preview.append(build_preview_row(item, items))
         if idx == total or idx == 1 or idx % 5 == 0:
             log(f"[整理預覽進度] {idx}/{total}")
 
-    dedup = {}
-    for row in preview:
-        dedup[row["order_id"]] = row
-
-    result = list(dedup.values())
-    result.sort(
+    preview.sort(
         key=lambda x: (
-            0 if x.get("has_same_address_history") else 1,
-            0 if x.get("purchase_status_name") == "已付款" else 1,
-            -(x.get("same_address_count", 0) or 0),
+            0 if x.get("can_autofill") else 1,
             str(x.get("service_date", "")),
             str(x.get("order_id", "")),
         )
     )
-    return result
+    return preview
 
 
 def preview_by_phone_multi(phone_text, ui_logger=None):
@@ -1233,9 +1179,7 @@ def preview_by_phone_multi(phone_text, ui_logger=None):
 
     all_rows.sort(
         key=lambda x: (
-            0 if x.get("has_same_address_history") else 1,
-            0 if x.get("purchase_status_name") == "已付款" else 1,
-            -(x.get("same_address_count", 0) or 0),
+            0 if x.get("can_autofill") else 1,
             str(x.get("service_date", "")),
             str(x.get("order_id", "")),
         )
@@ -1243,7 +1187,7 @@ def preview_by_phone_multi(phone_text, ui_logger=None):
     return all_rows
 
 
-def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name, ui_logger=None):
+def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name, limit=None, ui_logger=None):
     CURRENT_ROW_LOGS.clear()
     log = make_logger(ui_logger)
 
@@ -1278,20 +1222,8 @@ def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name,
 
     for idx, item in enumerate(items, start=1):
         phone = normalize_phone(item.get("phone", ""))
-        addr = item.get("address", "")
-
-        if not phone or not addr:
-            preview.append({
-                "order_id": item.get("order_no", ""),
-                "customer_name": item.get("name", ""),
-                "phone": phone,
-                "address": addr,
-                "service_date": display_service_date(item),
-                "same_address_count": 0,
-                "different_address_count": 0,
-                "has_same_address_history": False,
-                "purchase_status_name": item.get("purchase_status_name", ""),
-            })
+        if not phone:
+            preview.append(build_preview_row(item, [item]))
             continue
 
         if phone not in phone_cache:
@@ -1319,136 +1251,12 @@ def preview_by_conditions(date_mode, date_start, date_end, purchase_status_name,
     result = list(dedup.values())
     result.sort(
         key=lambda x: (
-            0 if x.get("has_same_address_history") else 1,
-            0 if x.get("purchase_status_name") == "已付款" else 1,
-            -(x.get("same_address_count", 0) or 0),
+            0 if x.get("can_autofill") else 1,
             str(x.get("service_date", "")),
             str(x.get("order_id", "")),
         )
     )
     return result
-
-
-def execute_target_order(session, target: Dict, source_type: str, source_value: str, log, log_ws):
-    CURRENT_ROW_LOGS.clear()
-
-    target_order_no = target.get("order_no", "")
-    target_form = parse_edit_page(session, target["edit_url"], target.get("phone", ""))
-
-    target_phone = normalize_phone(target_form.get("phone", "") or target.get("phone", ""))
-    target_name = target_form.get("customer_name", "") or target.get("name", "")
-    target_addr = target_form.get("address", "") or target.get("address", "")
-    target_service_date = target_form.get("service_date", "") or display_service_date(target)
-
-    log(f"\n===== 處理訂單 {target_order_no} =====")
-    log(f"訂單: {target_order_no}")
-    log(f"客戶: {target_name}")
-    log(f"電話: {target_phone}")
-    log(f"地址: {target_addr}")
-    log(f"日期: {target_service_date}")
-
-    if not target_phone or not target_addr:
-        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：目標單缺少電話或地址")
-
-    log("[歷史查詢] 開始抓同電話全部歷史訂單")
-    items = search_all_orders_by_phone(session, target_phone)
-    log(f"[歷史查詢] 主列表共 {len(items)} 筆")
-
-    items = enrich_items_from_detail(
-        session,
-        items,
-        target_phone,
-        log=log,
-        context_label=f"同電話 {target_phone} 歷史訂單"
-    )
-
-    log_candidate_addresses(log, items)
-
-    prev, reason = find_previous_processed_verbose(
-        current_order_no=target_order_no,
-        current_address=target_addr,
-        current_phone=target_phone,
-        current_service_date=target_form.get("service_date_obj"),
-        items=items,
-    )
-    if not prev:
-        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：{reason}")
-
-    prev_form = parse_edit_page(session, prev["edit_url"], target_phone)
-    prev_notice = str(prev_form.get("notice", "")).strip()
-
-    if prev_form.get("purchase_status") != "1":
-        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：上一筆不是已付款")
-
-    if prev_form.get("progress") not in ("1", "2"):
-        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：上一筆不是已處理/已完成")
-
-    if not prev_notice:
-        raise RuntimeError(f"❌ 處理失敗 {target_order_no}：上一筆找不到客服備註")
-
-    log(f"\n[上一筆來源] {display_service_date(prev)} {prev['order_no']} {prev.get('name', '')} {prev.get('purchase_status_name', '')} {prev['status']} {prev['address']}")
-
-    same_address_unprocessed = find_all_unprocessed_same_address(target_addr, target_phone, items)
-    log(f"[本次共更新] {len(same_address_unprocessed)} 筆未處理訂單")
-
-    group_ok = 0
-    group_fail = []
-
-    for t in same_address_unprocessed:
-        log(f"👉 寫入 {display_service_date(t)} {t['order_no']} {t.get('name', '')} {t.get('purchase_status_name', '')} {t['status']} {t['address']}")
-        tf = parse_edit_page(session, t["edit_url"], target_phone)
-        submit_update(session, tf, target_phone, prev_notice)
-        time.sleep(SLEEP_SECONDS)
-
-        ok, verified_form = verify_update(session, t["edit_url"], target_phone, prev_notice)
-        if ok:
-            log(f"✅ 驗證成功 {t['order_no']}")
-            group_ok += 1
-        else:
-            log(f"❌ 驗證失敗 {t['order_no']} (progress={verified_form.get('progress', '')}, notice_head={str(verified_form.get('notice', ''))[:30]})")
-            group_fail.append(t["order_no"])
-
-    if group_fail:
-        reason_text = f"❌ 處理失敗 {target_order_no}：失敗目標 {', '.join(group_fail)}"
-        log(reason_text)
-        append_log_row(
-            log_ws=log_ws,
-            source_type=source_type,
-            source_value=source_value,
-            phone=target_phone,
-            name=target_name,
-            address=target_addr,
-            current_order=target_order_no,
-            current_service_date=target_service_date,
-            prev_order=prev["order_no"],
-            prev_service_date=display_service_date(prev),
-            prev_notice=prev_notice,
-            updated_orders=group_ok,
-            status="失敗",
-            error_msg=reason_text,
-            full_log="\n".join(CURRENT_ROW_LOGS),
-        )
-        return {"ok": False, "error": reason_text, "updated_orders": group_ok}
-
-    log(f"✅ 成功：已回填 {group_ok} 筆")
-    append_log_row(
-        log_ws=log_ws,
-        source_type=source_type,
-        source_value=source_value,
-        phone=target_phone,
-        name=target_name,
-        address=target_addr,
-        current_order=target_order_no,
-        current_service_date=target_service_date,
-        prev_order=prev["order_no"],
-        prev_service_date=display_service_date(prev),
-        prev_notice=prev_notice,
-        updated_orders=group_ok,
-        status="成功",
-        error_msg="",
-        full_log="\n".join(CURRENT_ROW_LOGS),
-    )
-    return {"ok": True, "error": "", "updated_orders": group_ok}
 
 
 def get_sheet_summary(ui_logger=None):
@@ -1552,10 +1360,6 @@ def main(row_spec="2", force=False, ui_logger=None):
 
             if v_status and not force:
                 log(f"訂單: {order}")
-                log(f"客戶: {name}")
-                log(f"電話: {phone}")
-                log(f"地址: {addr}")
-                log(f"日期: {date}")
                 log("⏭ 已有狀態，略過")
                 result["skipped"] += 1
                 continue
