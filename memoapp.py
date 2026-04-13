@@ -1,5 +1,4 @@
 # memoapp.py
-# 若你原本跑的是 app.py，直接把這份內容覆蓋 app.py 即可
 # -*- coding: utf-8 -*-
 import streamlit as st
 import memo
@@ -8,58 +7,73 @@ st.set_page_config(page_title="Memo 自動回填系統", layout="wide")
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;600&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap');
-
 html, body, [class*="css"] {
-    font-family: 'DM Sans', 'Noto Sans TC', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif;
 }
 .block-container {
     padding-top: 1.2rem !important;
-    padding-bottom: 1rem !important;
-    max-width: 1220px !important;
+    padding-bottom: 2rem !important;
+    max-width: 1320px !important;
 }
 h1 {
     font-size: 20px !important;
     font-weight: 700 !important;
-    margin: 0 0 16px 0 !important;
+    margin-bottom: 14px !important;
 }
 .sec-label {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
-    color: #999;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin: 4px 0 8px 0;
+    color: #7a7a7a;
+    letter-spacing: .04em;
+    margin-bottom: 8px;
 }
 [data-testid="stButton"] > button {
     background: #111 !important;
     color: #fff !important;
     border: none !important;
-    border-radius: 8px !important;
-    font-size: 14px !important;
-    font-weight: 600 !important;
-    padding: 9px 0 !important;
+    border-radius: 10px !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    padding: 10px 0 !important;
 }
 [data-testid="stButton"] > button:hover {
     background: #333 !important;
 }
-[data-testid="stButton"] > button:disabled {
-    background: #ccc !important;
-}
 [data-testid="stCode"] {
-    font-size: 11.5px !important;
-    background: #13131f !important;
-    border-radius: 8px !important;
+    font-size: 12px !important;
+    border-radius: 10px !important;
 }
 [data-testid="stMetric"] {
-    background: #fff !important;
-    border: 1px solid #e6e8ec !important;
-    border-radius: 10px !important;
-    padding: 12px !important;
+    background: #fff;
+    border: 1px solid #ececec;
+    border-radius: 12px;
+    padding: 10px;
 }
-hr {
-    border-color: #ececec !important;
-    margin: 14px 0 !important;
+.small-muted {
+    color: #888;
+    font-size: 12px;
+}
+.preview-card {
+    border: 1px solid #ececec;
+    border-radius: 14px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    background: #fff;
+}
+.preview-ok {
+    border-left: 5px solid #16a34a;
+}
+.preview-ng {
+    border-left: 5px solid #d4d4d8;
+}
+.preview-title {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.preview-sub {
+    color: #555;
+    font-size: 13px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -88,7 +102,6 @@ for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# 防卡死
 st.session_state.is_running = False
 
 
@@ -108,7 +121,7 @@ def normalize_result(r):
 def render_result(result):
     r = normalize_result(result)
     with result_container:
-        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("---")
         sec("5. 執行結果")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("執行筆數", r["processed"])
@@ -122,7 +135,7 @@ def render_result(result):
                 for i, err in enumerate(r["errors"], 1):
                     st.markdown(f"**{i}.** {err}")
         elif r["processed"] > 0:
-            st.success(f"✅ 全部完成，共處理 **{r['processed']}** 筆，成功 **{r['success']}** 筆。")
+            st.success(f"✅ 全部完成，共處理 {r['processed']} 筆，成功 {r['success']} 筆。")
         else:
             st.info("執行完成，無資料被處理。")
 
@@ -182,131 +195,103 @@ def reset_mode_state_if_changed(current_mode):
         st.session_state.last_mode = current_mode
 
 
-def render_result_preview_blocks(rows):
+def render_preview_blocks(rows):
     sec("3. 查詢結果預覽")
 
     if not rows:
         st.info("查無資料")
         return []
 
-    total_count = len(rows)
-    same_count = sum(1 for r in rows if r.get("has_same_address_history"))
-    diff_count = total_count - same_count
-    paid_count = sum(1 for r in rows if r.get("purchase_status_name") == "已付款")
-    unpaid_count = sum(1 for r in rows if r.get("purchase_status_name") == "未付款")
+    can_rows = [r for r in rows if r.get("can_autofill")]
+    no_rows = [r for r in rows if not r.get("can_autofill")]
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("查詢總筆數", total_count)
-    m2.metric("有同地址", same_count)
-    m3.metric("無同地址", diff_count)
-    m4.metric("已付款", paid_count)
-    m5.metric("未付款", unpaid_count)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("查詢總筆數", len(rows))
+    m2.metric("可自動回填", len(can_rows))
+    m3.metric("無可參照來源", len(no_rows))
 
-    st.info("請先勾選要處理的資料，再按下方「執行勾選項目」。")
-
-    grouped = {
-        "same_paid": [],
-        "same_unpaid": [],
-        "diff_paid": [],
-        "diff_unpaid": [],
-    }
-
-    for row in rows:
-        has_same = bool(row.get("has_same_address_history"))
-        paid = row.get("purchase_status_name") == "已付款"
-
-        if has_same and paid:
-            grouped["same_paid"].append(row)
-        elif has_same and not paid:
-            grouped["same_unpaid"].append(row)
-        elif (not has_same) and paid:
-            grouped["diff_paid"].append(row)
-        else:
-            grouped["diff_unpaid"].append(row)
+    st.info("每一列是『目標訂單』；若有來源訂單，代表已找到最近一筆同地址＋已付款＋已處理＋有備註的來源。")
 
     selected_ids = []
 
-    def render_block(title, block_rows, block_key):
-        st.markdown(f"#### {title}")
-        if not block_rows:
+    def render_section(title, items, section_key, default_checked):
+        st.markdown(f"### {title}")
+        if not items:
             st.caption("沒有資料")
             return
 
         c1, c2, c3 = st.columns([1, 1, 4])
         with c1:
-            if st.button("本區全選", key=f"btn_sel_{block_key}", use_container_width=True):
-                for row in block_rows:
-                    oid = str(safe_get(row, "order_id", default="")).strip()
+            if st.button("本區全選", key=f"sel_{section_key}", use_container_width=True):
+                for row in items:
+                    oid = str(row.get("order_id", "")).strip()
                     if oid:
                         st.session_state[f"pick_{oid}"] = True
         with c2:
-            if st.button("本區全不選", key=f"btn_unsel_{block_key}", use_container_width=True):
-                for row in block_rows:
-                    oid = str(safe_get(row, "order_id", default="")).strip()
+            if st.button("本區全不選", key=f"unsel_{section_key}", use_container_width=True):
+                for row in items:
+                    oid = str(row.get("order_id", "")).strip()
                     if oid:
                         st.session_state[f"pick_{oid}"] = False
         with c3:
-            st.caption(f"本區共 {len(block_rows)} 筆")
+            st.caption(f"本區共 {len(items)} 筆")
 
-        header = st.columns([0.8, 1.4, 1.6, 2.8, 1.2, 1.0, 1.0, 1.0, 1.0, 1.2])
-        names = ["選取", "訂單編號", "姓名 / 電話", "地址", "日期", "同地址", "不同地址", "付款", "同址", "建議"]
-        for col, name in zip(header, names):
-            col.markdown(f"**{name}**")
-
-        for row in block_rows:
-            order_id = str(safe_get(row, "order_id", default="")).strip()
-            customer_name = safe_get(row, "customer_name", "name", default="")
-            phone = safe_get(row, "phone", default="")
-            address = safe_get(row, "address", default="")
-            service_date = safe_get(row, "service_date", default="")
-            same_addr_count = int(safe_get(row, "same_address_count", default=0) or 0)
-            diff_addr_count = int(safe_get(row, "different_address_count", default=0) or 0)
-            purchase_status_name = safe_get(row, "purchase_status_name", default="")
-            has_same = bool(safe_get(row, "has_same_address_history", default=False))
-
-            cols = st.columns([0.8, 1.4, 1.6, 2.8, 1.2, 1.0, 1.0, 1.0, 1.0, 1.2])
-            checked = cols[0].checkbox(
-                "選取",
+        for row in items:
+            order_id = str(row.get("order_id", "")).strip()
+            checked = st.checkbox(
+                f"選取 {order_id}",
                 key=f"pick_{order_id}",
-                label_visibility="collapsed",
-                value=st.session_state.get(f"pick_{order_id}", has_same),
+                value=st.session_state.get(f"pick_{order_id}", default_checked),
+                label_visibility="collapsed"
             )
-            cols[1].write(order_id)
-            cols[2].write(f"{customer_name}\n{phone}".strip())
-            cols[3].write(address)
-            cols[4].write(service_date)
-            cols[5].write(f"{same_addr_count} 筆")
-            cols[6].write(f"{diff_addr_count} 筆")
-            cols[7].write(purchase_status_name or "-")
-            cols[8].write("有" if has_same else "無")
-            cols[9].write("建議優先" if has_same else "人工確認")
+
+            card_cls = "preview-card preview-ok" if row.get("can_autofill") else "preview-card preview-ng"
+
+            target_name = row.get("customer_name", "")
+            phone = row.get("phone", "")
+            address = row.get("address", "")
+            service_date = row.get("service_date", "")
+            purchase_status_name = row.get("purchase_status_name", "")
+            source_order_id = row.get("source_order_id", "")
+            source_service_date = row.get("source_service_date", "")
+            source_purchase_status_name = row.get("source_purchase_status_name", "")
+            source_status_name = row.get("source_status_name", "")
+            source_notice_preview = row.get("source_notice_preview", "")
+            can_autofill = row.get("can_autofill", False)
+
+            st.markdown(f"""
+            <div class="{card_cls}">
+                <div class="preview-title">目前訂單：{order_id}</div>
+                <div class="preview-sub">
+                    <b>客戶 / 電話：</b>{target_name} / {phone}<br>
+                    <b>地址：</b>{address}<br>
+                    <b>目前服務日期：</b>{service_date}　
+                    <b>目前付款狀態：</b>{purchase_status_name or "-"}
+                </div>
+                <hr style="margin:10px 0;">
+                <div class="preview-sub">
+                    <b>來源訂單：</b>{source_order_id or "無"}<br>
+                    <b>來源服務日期：</b>{source_service_date or "-"}　
+                    <b>來源付款狀態：</b>{source_purchase_status_name or "-"}　
+                    <b>來源服務狀態：</b>{source_status_name or "-"}<br>
+                    <b>來源備註：</b>{source_notice_preview or "無"}
+                </div>
+                <div class="preview-sub" style="margin-top:8px;">
+                    <b>建議：</b>{"建議執行" if can_autofill else "無可參照來源，請人工確認"}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
             if checked and order_id:
                 selected_ids.append(order_id)
 
-    render_block("有同地址紀錄｜已付款", grouped["same_paid"], "same_paid")
-    render_block("有同地址紀錄｜未付款", grouped["same_unpaid"], "same_unpaid")
-    render_block("無同地址紀錄｜已付款", grouped["diff_paid"], "diff_paid")
-    render_block("無同地址紀錄｜未付款", grouped["diff_unpaid"], "diff_unpaid")
+    render_section("可自動回填", can_rows, "can_autofill", True)
+    render_section("無可參照來源", no_rows, "no_source", False)
 
-    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("---")
     sec("4. 執行確認")
-
-    selected_rows = [r for r in rows if str(safe_get(r, "order_id", default="")).strip() in selected_ids]
-    sel_total = len(selected_rows)
-    sel_same = sum(1 for r in selected_rows if r.get("has_same_address_history"))
-    sel_diff = sel_total - sel_same
-    sel_paid = sum(1 for r in selected_rows if r.get("purchase_status_name") == "已付款")
-    sel_unpaid = sum(1 for r in selected_rows if r.get("purchase_status_name") == "未付款")
-
-    x1, x2, x3, x4, x5 = st.columns(5)
-    x1.metric("目前勾選", sel_total)
-    x2.metric("有同地址", sel_same)
-    x3.metric("無同地址", sel_diff)
-    x4.metric("已付款", sel_paid)
-    x5.metric("未付款", sel_unpaid)
-
-    st.caption("確認後將開始回填客服備註並更新狀態。")
+    st.metric("目前勾選", len(selected_ids))
+    st.caption("執行後會把來源客服備註寫入目標訂單，並把目標訂單服務狀態改為已處理。")
     return selected_ids
 
 
@@ -367,7 +352,7 @@ if st.session_state.is_logged_in:
 else:
     st.info("請先登入後再查詢或執行。")
 
-st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("---")
 
 sec("2. 設定查詢條件")
 mode = st.radio(
@@ -423,7 +408,7 @@ if mode == "By Google Sheet":
 
 elif mode == "By 電話":
     phone_text = st.text_input("電話號碼（可輸入多筆，用逗號分隔）", placeholder="例：0912345678,0922345678")
-    st.caption("可輸入多筆電話，用逗號分隔；查詢列表不會先套用處理筆數，會先查詢列表，再勾選執行。")
+    st.caption("會先找出『目標訂單』，再比對最近一筆可參照的來源訂單。")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -444,7 +429,7 @@ else:
     with c4:
         end_date = st.date_input("結束日期", value=None)
 
-    st.caption("搜尋條件查詢固定只撈服務狀態＝未處理；查詢列表不會先套用處理筆數。")
+    st.caption("搜尋條件固定只撈服務狀態＝未處理的目標訂單，再比對最近的可參照來源。")
 
     c5, c6 = st.columns(2)
     with c5:
@@ -455,11 +440,6 @@ else:
 with st.expander("4. 執行過程", expanded=True):
     log_box = st.empty()
     log_box.code("\n".join(st.session_state.logs[-3000:]) if st.session_state.logs else "尚未執行")
-
-selected_ids = []
-if mode in ["By 電話", "By 搜尋條件"] and st.session_state.preview_rows:
-    st.markdown("<hr>", unsafe_allow_html=True)
-    selected_ids = render_result_preview_blocks(st.session_state.preview_rows)
 
 result_container = st.container()
 if st.session_state.result is not None:
@@ -489,7 +469,10 @@ if search_btn:
             if mode == "By 電話":
                 if not phone_text.strip():
                     raise ValueError("請輸入至少一支電話")
-                preview_rows = memo.preview_by_phone_multi(phone_text=phone_text.strip(), ui_logger=ui_log)
+                preview_rows = memo.preview_by_phone_multi(
+                    phone_text=phone_text.strip(),
+                    ui_logger=ui_log
+                )
             else:
                 start_text = start_date.strftime("%Y/%m/%d") if start_date else ""
                 end_text = end_date.strftime("%Y/%m/%d") if end_date else ""
@@ -503,12 +486,18 @@ if search_btn:
 
         st.session_state.preview_rows = preview_rows or []
         ui_log(f"✅ 查詢完成，共 {len(st.session_state.preview_rows)} 筆")
+        st.rerun()
 
     except Exception as e:
         ui_log(f"❌ 查詢錯誤：{e}")
         st.error(str(e))
     finally:
         st.session_state.is_running = False
+
+selected_ids = []
+if mode in ["By 電話", "By 搜尋條件"] and st.session_state.preview_rows:
+    st.markdown("---")
+    selected_ids = render_preview_blocks(st.session_state.preview_rows)
 
 if execute_btn:
     try:
